@@ -1,0 +1,6 @@
+{
+  "name": "SAT Test Bank Reviewer",
+  "description": "Upload a JSON file of test items to review, edit, filter, and approve or reject them to build an official SAT test bank.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
