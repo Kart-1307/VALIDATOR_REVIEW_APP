@@ -65,6 +65,24 @@ create table if not exists public.questions_batch2 (
   updated_at timestamptz not null default now()
 );
 
+-- ---------------------------------------------------------------------------
+-- 1b. Batch tracking columns — added after initial launch. Tags each row
+-- with which JSON upload introduced it, so validators can filter to "just
+-- the new stuff" and admins can bulk-remove a bad upload. batch_uploaded_at
+-- is the effectively-unique key (set once, at first-insert time, and never
+-- touched again on later updates to that same question — see
+-- NewBatchWorkspace.tsx's readFiles()); batch_label is the human-facing
+-- name, defaulting to a formatted timestamp if the admin leaves it blank.
+-- Intentionally NOT added to public.questions — these columns are New Batch
+-- only, which is why NewBatchWorkspace.tsx uses its own row<->question
+-- mapper wrappers instead of the shared ones in lib/mappers.ts.
+-- ---------------------------------------------------------------------------
+alter table public.questions_batch2 add column if not exists batch_label text;
+alter table public.questions_batch2 add column if not exists batch_uploaded_at timestamptz;
+
+create index if not exists questions_batch2_batch_uploaded_at_idx
+  on public.questions_batch2 (batch_uploaded_at);
+
 alter table public.questions_batch2 enable row level security;
 
 -- Same policy shape as public.questions (viewable by any authenticated

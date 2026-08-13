@@ -60,6 +60,15 @@ export interface SATQuestion {
   reviewStatus?: 'pending' | 'approved' | 'rejected' | 'needs_revision';
   createdAt?: string;
 
+  // --- New Batch tab only: which upload this question was introduced by.
+  // batchUploadedAt is the effectively-unique key (ISO timestamp of the
+  // merge event); batchLabel is the admin-facing display name (falls back
+  // to a formatted date if left blank on upload). Never set/read on the
+  // main Curator `questions` table — see mappers usage in
+  // NewBatchWorkspace.tsx. ---
+  batchLabel?: string | null;
+  batchUploadedAt?: string | null;
+
   // --- Validator context (from the pipeline's own verdict, set during generation) ---
   validatorStatus?: 'approved' | 'escalated' | 'rejected' | string;
   validatorFeedback?: string;

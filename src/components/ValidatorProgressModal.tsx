@@ -1,9 +1,25 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { X, FileSpreadsheet, CalendarDays, User as UserIcon, CalendarRange } from 'lucide-react';
-import { SATQuestion } from '../types';
-import { Profile } from '../lib/supabaseClient';
+import { SATQuestion, QuestionComment } from '../types';
+import { supabase, Profile } from '../lib/supabaseClient';
 import { AuditLogEntry } from './AuditActivityLogs';
+
+// Lightweight metadata for New Batch (questions_batch2) questions — this
+// modal only ever received the main Curator `questions` table as a prop, so
+// any validator activity that happened in the New Batch tab resolved to an
+// undefined question and exported with blank Subject/Domain/Sub
+// Skill/Difficulty and a hardcoded "pending" status. This fetches just
+// enough columns from questions_batch2 to fill those gaps.
+interface Batch2Meta {
+  category?: string;
+  subSkill?: string;
+  section?: string;
+  module?: string;
+  difficulty?: string;
+  reviewStatus?: string;
+  comments?: QuestionComment[];
+}
 
 interface ValidatorProgressModalProps {
   isOpen: boolean;
@@ -28,6 +44,11 @@ const isFinalReject = (d: string) =>
 const isNeedsRevision = (d: string) =>
   /overall status now needs revision/i.test(d) || /overrode overall status of item ".*?" to "needs_revision"/i.test(d);
 const isComment = (d: string) => /commented on item/i.test(d);
+// NewBatchWorkspace.tsx's logEvent() prefixes every description with
+// "[New Batch] ". isFinalApprove/isFinalReject match with a ^ anchor, so
+// without stripping this prefix first, New Batch approvals/rejections never
+// matched and silently fell through to the generic 'Edited' tag instead.
+const stripBatchPrefix = (d: string) => d.replace(/^\[New Batch\]\s*/, '');
 
 // yyyy-mm-dd in the browser's local timezone — matches the <input type="date"> value
 const toLocalDateKey = (d: Date) => {
@@ -67,6 +88,30 @@ export default function ValidatorProgressModal({
     questions.forEach(q => map.set(q.id, q));
     return map;
   }, [questions]);
+
+  const [batch2ById, setBatch2ById] = useState<Map<string, Batch2Meta>>(new Map());
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    supabase
+      .from('questions_batch2')
+      .select('id, category, sub_skill, section, module, difficulty, review_status, comments')
+      .then(({ data, error }) => {
+        if (cancelled || error || !data) return;
+        const map = new Map<string, Batch2Meta>();
+        data.forEach((row: any) => map.set(row.id, {
+          category: row.category,
+          subSkill: row.sub_skill || undefined,
+          section: row.section || undefined,
+          module: row.module || undefined,
+          difficulty: row.difficulty || undefined,
+          reviewStatus: row.review_status || undefined,
+          comments: row.comments || []
+        }));
+        setBatch2ById(map);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -109,12 +154,13 @@ export default function ValidatorProgressModal({
       }
       const entry = perQuestion.get(qid)!;
 
-      if (isClaim(log.description)) entry.tags.add('Claimed');
-      else if (isRelease(log.description)) entry.tags.add('Released Claim');
-      else if (isFinalApprove(log.description)) entry.tags.add('Approved');
-      else if (isFinalReject(log.description)) entry.tags.add('Rejected');
-      else if (isNeedsRevision(log.description)) entry.tags.add('Needs Revision');
-      else if (isComment(log.description)) {
+      const d = stripBatchPrefix(log.description);
+      if (isClaim(d)) entry.tags.add('Claimed');
+      else if (isRelease(d)) entry.tags.add('Released Claim');
+      else if (isFinalApprove(d)) entry.tags.add('Approved');
+      else if (isFinalReject(d)) entry.tags.add('Rejected');
+      else if (isNeedsRevision(d)) entry.tags.add('Needs Revision');
+      else if (isComment(d)) {
         entry.tags.add('Commented');
         commentsAdded += 1;
       } else {
@@ -145,17 +191,20 @@ export default function ValidatorProgressModal({
   const buildDetailRows = (activity: ReturnType<typeof buildActivityForValidator>) => {
     return [...activity.perQuestion.values()].map(entry => {
       const q = questionById.get(entry.questionId);
-      const ownComments = (q?.comments || []).filter(c => c.author === activity.validatorName);
+      const b2 = !q ? batch2ById.get(entry.questionId) : undefined;
+      const commentsSource = q?.comments || b2?.comments || [];
+      const ownComments = commentsSource.filter(c => c.author === activity.validatorName);
       const row: Record<string, string> = {
         'Question ID': entry.questionId,
-        Subject: q?.Section || q?.section || q?.module || '',
-        Domain: q?.category || '',
-        'Sub Skill': q?.subSkill || '',
-        Difficulty: q?.difficulty || '',
+        Subject: q?.Section || q?.section || q?.module || b2?.section || b2?.module || '',
+        Domain: q?.category || b2?.category || '',
+        'Sub Skill': q?.subSkill || b2?.subSkill || '',
+        Difficulty: q?.difficulty || b2?.difficulty || '',
         'Action(s)': [...entry.tags].join(', '),
-        'Current Review Status': q?.reviewStatus || 'pending',
+        'Current Review Status': q?.reviewStatus || b2?.reviewStatus || 'pending',
         'Comments (by this validator)': ownComments.map(c => `[${new Date(c.timestamp).toLocaleString()}] ${c.text}`).join(' | '),
-        'Last Action Time': entry.lastActionAt
+        'Last Action Time': entry.lastActionAt,
+        Source: q ? 'Curator' : (b2 ? 'New Batch' : 'Unknown (deleted?)')
       };
       // Only worth a dedicated day column when spanning more than one day —
       // for a single-day export the period is already implied by the sheet.
@@ -169,11 +218,11 @@ export default function ValidatorProgressModal({
   const detailColWidths = rangeMode === 'range' && rangeBounds.from !== rangeBounds.to
     ? [
         { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
-        { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }
+        { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }, { wch: 12 }
       ]
     : [
         { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
-        { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }
+        { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }
       ];
 
   const handleExport = () => {

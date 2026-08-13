@@ -25,7 +25,8 @@ import {
   GitMerge,
   ChevronDown,
   FileSpreadsheet,
-  Download
+  Download,
+  Tag
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -35,6 +36,23 @@ import * as XLSX from 'xlsx';
 // component never touches that table except for the explicit "Merge into
 // Curator" admin action below.
 const TABLE_NAME = 'questions_batch2';
+
+// questions_batch2-only columns (see migration_new_batch_workspace.sql §1b).
+// Deliberately NOT added to lib/mappers.ts's shared QuestionRow/questionToRow
+// — those are also used to write the main `questions` table, which has no
+// batch_label/batch_uploaded_at columns. These thin wrappers layer batch
+// tracking on top of the shared mappers for this workspace only.
+type Batch2Row = QuestionRow & { batch_label: string | null; batch_uploaded_at: string | null };
+const rowToBatch2Question = (row: Batch2Row): SATQuestion => ({
+  ...rowToQuestion(row),
+  batchLabel: row.batch_label ?? null,
+  batchUploadedAt: row.batch_uploaded_at ?? null
+});
+const questionToBatch2Row = (q: SATQuestion) => ({
+  ...questionToRow(q),
+  batch_label: q.batchLabel ?? null,
+  batch_uploaded_at: q.batchUploadedAt ?? null
+});
 // Prefix used on bulk_action_snapshots.action_type so "Undo Last Bulk
 // Action" here only ever considers snapshots created by *this* workspace,
 // even though bulk_action_snapshots is a shared table with the main tab.
@@ -96,6 +114,13 @@ export default function NewBatchWorkspace({
   const [selectedEditQuestion, setSelectedEditQuestion] = useState<SATQuestion | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // --- Batch tracking (see migration §1b) ---
+  const [nextBatchLabel, setNextBatchLabel] = useState('');
+  const [batchFilter, setBatchFilter] = useState<string>('all'); // 'all' | 'untagged' | a batchUploadedAt key
+  const [removeBatchModalOpen, setRemoveBatchModalOpen] = useState(false);
+  const [removeBatchKey, setRemoveBatchKey] = useState<string>('');
+  const [removeBatchTypedText, setRemoveBatchTypedText] = useState('');
+  const [isRemovingBatch, setIsRemovingBatch] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [duplicateCompareQuestion, setDuplicateCompareQuestion] = useState<SATQuestion | null>(null);
   const [historyDrawerQuestion, setHistoryDrawerQuestion] = useState<SATQuestion | null>(null);
@@ -182,10 +207,10 @@ export default function NewBatchWorkspace({
           .range(from, from + PAGE - 1);
         if (qError || !qRows) break;
         if (first) {
-          setQuestions((qRows as QuestionRow[]).map(rowToQuestion));
+          setQuestions((qRows as Batch2Row[]).map(rowToBatch2Question));
           first = false;
         } else {
-          const incoming = (qRows as QuestionRow[]).map(rowToQuestion);
+          const incoming = (qRows as Batch2Row[]).map(rowToBatch2Question);
           setQuestions(prev => {
             const seen = new Set(prev.map(q => q.id));
             return [...prev, ...incoming.filter(q => !seen.has(q.id))];
@@ -204,7 +229,7 @@ export default function NewBatchWorkspace({
           if (payload.eventType === 'DELETE') {
             return prev.filter(q => q.id !== (payload.old as any).id);
           }
-          const incoming = rowToQuestion(payload.new as QuestionRow);
+          const incoming = rowToBatch2Question(payload.new as Batch2Row);
           if ((pendingWritesRef.current.get(incoming.id) || 0) > 0) return prev;
           const exists = prev.some(q => q.id === incoming.id);
           return exists ? prev.map(q => q.id === incoming.id ? incoming : q) : [...prev, incoming];
@@ -266,7 +291,7 @@ export default function NewBatchWorkspace({
     const releasePending = (rows: SATQuestion[]) => rows.forEach(q => bumpPending(q.id, -1));
 
     const insertOp = newRows.length > 0
-      ? supabase.from(TABLE_NAME).insert(newRows.map(questionToRow))
+      ? supabase.from(TABLE_NAME).insert(newRows.map(questionToBatch2Row))
         .then(result => { releasePending(newRows); return result; })
       : null;
 
@@ -276,7 +301,7 @@ export default function NewBatchWorkspace({
       for (let i = 0; i < existingRows.length; i += WRITE_CHUNK_SIZE) {
         const chunk = existingRows.slice(i, i + WRITE_CHUNK_SIZE);
         const results = await Promise.all(chunk.map(q =>
-          supabase.from(TABLE_NAME).update(questionToRow(q)).eq('id', q.id)
+          supabase.from(TABLE_NAME).update(questionToBatch2Row(q)).eq('id', q.id)
             .then(result => { releasePending([q]); return result; })
         ));
         results.forEach(r => { if (r.error) failures.push(r as { error: { message: string } }); });
@@ -308,6 +333,36 @@ export default function NewBatchWorkspace({
     }
     setQuestions([]);
     return true;
+  };
+
+  const removeBatch = async (batchKey: string) => {
+    if (!isAdmin) { showToast('Only admins can remove a batch.', 'error'); return; }
+    const group = batchGroups.find(g => g.key === batchKey);
+    const idsToDelete = questions.filter(q => q.batchUploadedAt === batchKey).map(q => q.id);
+    if (idsToDelete.length === 0) {
+      showToast('No questions found for that batch.', 'error');
+      return;
+    }
+    setIsRemovingBatch(true);
+    const { error } = await supabase.from(TABLE_NAME).delete().in('id', idsToDelete);
+    setIsRemovingBatch(false);
+    if (error) {
+      showToast(`Failed to remove batch: ${error.message}`, 'error');
+      return;
+    }
+    setQuestions(prev => prev.filter(q => q.batchUploadedAt !== batchKey));
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      idsToDelete.forEach(id => next.delete(id));
+      return next;
+    });
+    const label = group?.label || batchKey;
+    showToast(`Removed batch "${label}" — ${idsToDelete.length} question(s) deleted from New Batch.`, 'info');
+    logEvent('clear', `Removed batch "${label}" (${idsToDelete.length} question(s): ${group?.pending || 0} pending, ${group?.approved || 0} approved, ${group?.rejected || 0} rejected, ${group?.needsRevision || 0} needs revision)`);
+    setRemoveBatchModalOpen(false);
+    setRemoveBatchKey('');
+    setRemoveBatchTypedText('');
+    if (batchFilter === batchKey) setBatchFilter('all');
   };
 
   const deriveOverallStatus = (q: SATQuestion): 'pending' | 'approved' | 'rejected' | 'needs_revision' => {
@@ -466,7 +521,7 @@ export default function NewBatchWorkspace({
   const refreshQuestionFromServer = async (id: string) => {
     const { data, error } = await supabase.from(TABLE_NAME).select('*').eq('id', id).single();
     if (!error && data) {
-      const fresh = rowToQuestion(data as QuestionRow);
+      const fresh = rowToBatch2Question(data as Batch2Row);
       setQuestions(prev => prev.map(q => q.id === id ? { ...q, ...fresh } : q));
     }
   };
@@ -608,6 +663,26 @@ export default function NewBatchWorkspace({
     return s;
   }, [questions]);
 
+  interface BatchGroup { key: string; label: string; uploadedAt: string; count: number; pending: number; approved: number; rejected: number; needsRevision: number; }
+  const batchGroups = useMemo(() => {
+    const map = new Map<string, BatchGroup>();
+    questions.forEach(q => {
+      const key = q.batchUploadedAt || '';
+      if (!key) return; // pre-feature / imported rows with no batch tag — excluded from grouping
+      if (!map.has(key)) {
+        map.set(key, { key, label: q.batchLabel || key, uploadedAt: key, count: 0, pending: 0, approved: 0, rejected: 0, needsRevision: 0 });
+      }
+      const g = map.get(key)!;
+      g.count++;
+      if (!q.reviewStatus || q.reviewStatus === 'pending') g.pending++;
+      else if (q.reviewStatus === 'approved') g.approved++;
+      else if (q.reviewStatus === 'rejected') g.rejected++;
+      else if (q.reviewStatus === 'needs_revision') g.needsRevision++;
+    });
+    return Array.from(map.values()).sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+  }, [questions]);
+  const untaggedCount = useMemo(() => questions.filter(q => !q.batchUploadedAt).length, [questions]);
+
   const uniqueCategories = useMemo(() => Array.from(new Set<string>(questions.map(q => q.category as string))).sort(), [questions]);
   const uniqueSections = useMemo(() => Array.from(new Set<string>(questions.map(q => (q.Section || q.section || 'Reading_Writing') as string))).sort(), [questions]);
 
@@ -636,8 +711,11 @@ export default function NewBatchWorkspace({
       if (filters.dateFrom) dateMatch = dateMatch && created >= new Date(filters.dateFrom).getTime();
       if (filters.dateTo) dateMatch = dateMatch && created <= new Date(filters.dateTo).getTime() + 86400000;
     }
-    return searchMatch && sectionMatch && categoryMatch && difficultyMatch && statusMatch && runIdMatch && assignedMatch && dateMatch;
-  }), [questions, filters]);
+    let batchMatch = true;
+    if (batchFilter === 'untagged') batchMatch = !q.batchUploadedAt;
+    else if (batchFilter !== 'all') batchMatch = q.batchUploadedAt === batchFilter;
+    return searchMatch && sectionMatch && categoryMatch && difficultyMatch && statusMatch && runIdMatch && assignedMatch && dateMatch && batchMatch;
+  }), [questions, filters, batchFilter]);
 
   const difficultyRank: Record<string, number> = { easy: 0, medium: 1, hard: 2 };
   const sortedQuestions = useMemo(() => [...filteredQuestions].sort((a, b) => {
@@ -662,7 +740,7 @@ export default function NewBatchWorkspace({
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  useEffect(() => { setCurrentPage(1); }, [filters, questions.length]);
+  useEffect(() => { setCurrentPage(1); }, [filters, questions.length, batchFilter]);
   const totalPages = Math.max(1, Math.ceil(filteredQuestions.length / pageSize));
   const pageSafe = Math.min(currentPage, totalPages);
   const paginatedQuestions = useMemo(() => sortedQuestions.slice((pageSafe - 1) * pageSize, pageSafe * pageSize), [sortedQuestions, pageSafe, pageSize]);
@@ -889,20 +967,37 @@ export default function NewBatchWorkspace({
       showToast(failed.length > 0 ? String(failed[0].reason) : 'Failed to load any files.', 'error');
       return;
     }
+    // One batch identity per upload call: batchUploadedAt is the unique key
+    // (used for filtering/deletion), batchLabel is what's shown in the UI.
+    const batchUploadedAt = new Date().toISOString();
+    const trimmedLabel = nextBatchLabel.trim();
+    const batchLabel = trimmedLabel || new Date().toLocaleString(undefined, {
+      month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
+    });
+
     const merged = new Map<string, SATQuestion>();
     questions.forEach(q => merged.set(q.id, q));
     let incomingCount = 0;
     let updatedCount = 0;
     succeeded.forEach(({ value }) => {
       value.sanitized.forEach(q => {
-        if (merged.has(q.id)) updatedCount++; else incomingCount++;
-        merged.set(q.id, q);
+        const existing = merged.get(q.id);
+        if (existing) {
+          // Already in the pool — this is a content update, not a new
+          // question, so it keeps whichever batch first introduced it.
+          updatedCount++;
+          merged.set(q.id, { ...q, batchLabel: existing.batchLabel ?? null, batchUploadedAt: existing.batchUploadedAt ?? null });
+        } else {
+          incomingCount++;
+          merged.set(q.id, { ...q, batchLabel, batchUploadedAt });
+        }
       });
     });
     const mergedList = Array.from(merged.values());
     saveQuestions(mergedList);
+    setNextBatchLabel('');
     const fileNames = succeeded.map(s => s.value.file).join(', ');
-    const summary = `Merged ${succeeded.length} file(s) [${fileNames}] into New Batch — ${incomingCount} new item(s), ${updatedCount} updated by id. New Batch workspace now has ${mergedList.length} total.`;
+    const summary = `Merged ${succeeded.length} file(s) [${fileNames}] into New Batch as batch "${batchLabel}" — ${incomingCount} new item(s) tagged to this batch, ${updatedCount} existing item(s) updated by id (kept their original batch). New Batch workspace now has ${mergedList.length} total.`;
     logEvent('upload', summary);
     if (failed.length > 0) {
       const failureReasons = failed.map(f => String(f.reason)).join(' ');
@@ -1185,6 +1280,17 @@ export default function NewBatchWorkspace({
         <div className="relative z-10 flex gap-2 w-full md:w-auto">
           {isAdmin && (
             <>
+              <div className="relative flex-1 md:flex-none md:w-52">
+                <Tag className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={nextBatchLabel}
+                  onChange={(e) => setNextBatchLabel(e.target.value)}
+                  placeholder="Batch label (optional)"
+                  title="Name for this upload's batch — shown to validators as a filter. Leave blank to use the upload date/time."
+                  className="w-full pl-8 pr-2.5 py-2.5 text-xs font-semibold rounded-xl border border-[#e4e4e7] bg-white text-zinc-900 placeholder:text-zinc-500 placeholder:font-normal focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1]"
+                />
+              </div>
               <input type="file" accept=".json" multiple ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
               <button
                 onClick={() => fileInputRef.current?.click()}
@@ -1305,6 +1411,36 @@ export default function NewBatchWorkspace({
         hasActiveFilters={hasActiveFilters}
         validators={validators}
       />
+
+      {batchGroups.length > 0 && (
+        <div className="mb-6 flex flex-wrap items-center gap-3 bg-[#fafafa] border border-[#e4e4e7] rounded-xl p-3">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-600 shrink-0">
+            <Layers className="w-3.5 h-3.5" /> Batch:
+          </div>
+          <select
+            value={batchFilter}
+            onChange={(e) => setBatchFilter(e.target.value)}
+            className="flex-1 min-w-[14rem] px-3 py-2 text-xs font-semibold rounded-lg border border-[#e4e4e7] bg-white text-zinc-900 focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1] cursor-pointer"
+          >
+            <option value="all">All batches ({questions.length})</option>
+            {batchGroups.map(g => (
+              <option key={g.key} value={g.key}>
+                {g.label} — {new Date(g.uploadedAt).toLocaleString()} ({g.count})
+              </option>
+            ))}
+            {untaggedCount > 0 && <option value="untagged">Untagged / legacy items ({untaggedCount})</option>}
+          </select>
+          {isAdmin && batchFilter !== 'all' && batchFilter !== 'untagged' && (
+            <button
+              onClick={() => { setRemoveBatchKey(batchFilter); setRemoveBatchModalOpen(true); }}
+              title="Delete every question tagged with this batch"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-lg border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-900 hover:text-white transition-all cursor-pointer shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Remove This Batch
+            </button>
+          )}
+        </div>
+      )}
 
       {lastBulkSnapshot && !isAuditor && (
         <div className="mb-6 bg-amber-50 border border-amber-300/60 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3 select-none">
@@ -1589,6 +1725,51 @@ export default function NewBatchWorkspace({
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
+
+      {/* Remove Batch confirm modal */}
+      <AnimatePresence>
+        {removeBatchModalOpen && (() => {
+          const group = batchGroups.find(g => g.key === removeBatchKey);
+          if (!group) return null;
+          const typedOk = removeBatchTypedText.trim().toUpperCase() === 'DELETE';
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isRemovingBatch && setRemoveBatchModalOpen(false)} className="absolute inset-0 bg-[#000]/90" />
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 10 }} className="relative w-full max-w-md bg-[#fafafa] border border-[#e4e4e7] rounded-2xl p-6 shadow-2xl overflow-hidden z-10">
+                <div className="flex items-start gap-4">
+                  <div className="w-10 h-10 rounded-full bg-rose-50 border border-rose-500/30 flex items-center justify-center text-rose-500 shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1.5 flex-1">
+                    <h3 className="text-sm font-bold text-zinc-900 tracking-tight">Remove batch "{group.label}"?</h3>
+                    <p className="text-xs text-zinc-500 leading-relaxed">
+                      Permanently deletes all {group.count} question(s) tagged with this batch from the New Batch pool — regardless of review status. This does not undo anything already merged into the main Curator pool, and it cannot be undone here.
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      <span className="px-2 py-0.5 text-[11px] font-bold rounded-full bg-zinc-100 text-zinc-600 border border-zinc-200">{group.pending} pending</span>
+                      <span className="px-2 py-0.5 text-[11px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">{group.approved} approved</span>
+                      <span className="px-2 py-0.5 text-[11px] font-bold rounded-full bg-rose-50 text-rose-700 border border-rose-200">{group.rejected} rejected</span>
+                      <span className="px-2 py-0.5 text-[11px] font-bold rounded-full bg-amber-50 text-amber-700 border border-amber-200">{group.needsRevision} needs revision</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <label className="text-[11px] font-bold text-zinc-500 uppercase tracking-wide">Type DELETE to confirm</label>
+                  <input autoFocus value={removeBatchTypedText} onChange={(e) => setRemoveBatchTypedText(e.target.value)} placeholder="DELETE" className="mt-1.5 w-full px-3 py-2 text-sm rounded-lg border border-[#e4e4e7] bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/40" />
+                </div>
+                <div className="mt-6 flex items-center justify-end gap-3">
+                  <button type="button" disabled={isRemovingBatch} onClick={() => { setRemoveBatchModalOpen(false); setRemoveBatchTypedText(''); }} className="px-4 py-2 text-xs font-bold text-zinc-500 hover:text-zinc-900 bg-[#f2f2f3] hover:bg-[#e8e8e9] border border-[#e4e4e7] rounded-xl transition-all cursor-pointer disabled:opacity-50">
+                    Cancel
+                  </button>
+                  <button type="button" disabled={!typedOk || isRemovingBatch} onClick={() => removeBatch(group.key)} className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 border border-rose-600 rounded-xl transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                    {isRemovingBatch ? 'Removing…' : `Remove ${group.count} Question(s)`}
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       {/* Merge into Curator modal */}
