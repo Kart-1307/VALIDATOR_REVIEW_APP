@@ -351,6 +351,9 @@ create policy "Admins can update settings"
 -- ---------------------------------------------------------------------------
 -- 5. REALTIME (spec §7: near-real-time status sync across validators)
 -- ---------------------------------------------------------------------------
+-- Ensure full row (including TOASTed text columns) is emitted in Realtime UPDATE events
+alter table public.questions replica identity full;
+
 do $$
 begin
   if not exists (

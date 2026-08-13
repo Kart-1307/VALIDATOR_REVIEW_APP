@@ -398,7 +398,19 @@ export default function App() {
           // at least as fresh as this event.
           if ((pendingWritesRef.current.get(incoming.id) || 0) > 0) return prev;
           const exists = prev.some(q => q.id === incoming.id);
-          return exists ? prev.map(q => q.id === incoming.id ? incoming : q) : [...prev, incoming];
+          if (!exists) return [...prev, incoming];
+          return prev.map(q => {
+            if (q.id !== incoming.id) return q;
+            return {
+              ...incoming,
+              // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
+              passage: incoming.passage ?? q.passage,
+              explanation: incoming.explanation || q.explanation,
+              stimulus: incoming.stimulus ?? q.stimulus,
+              question: incoming.question || q.question,
+              choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : q.choices,
+            };
+          });
         });
       })
       .subscribe();
@@ -828,12 +840,21 @@ export default function App() {
     }
 
     const claimedAt = new Date().toISOString();
+
+    // Bump pending writes ref so incoming realtime echo does not clobber state
+    const map = pendingWritesRef.current;
+    map.set(id, (map.get(id) || 0) + 1);
+
     const { data, error } = await supabase
       .from('questions')
       .update({ claimed_by: session?.user.id || null, claimed_by_name: validatorName, claimed_at: claimedAt })
       .eq('id', id)
       .is('claimed_by', null) // <-- the atomic guard: only claims if still unclaimed server-side
       .select('id');
+
+    // Release pending write
+    const currentPending = (map.get(id) || 0) - 1;
+    if (currentPending > 0) map.set(id, currentPending); else map.delete(id);
 
     if (error) {
       showToast(`Failed to claim: ${error.message}`, 'error');

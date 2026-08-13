@@ -118,6 +118,9 @@ create trigger questions_batch2_set_updated_at
   before update on public.questions_batch2
   for each row execute procedure public.set_updated_at();
 
+-- Ensure full row (including TOASTed text columns) is emitted in Realtime UPDATE events
+alter table public.questions_batch2 replica identity full;
+
 do $$
 begin
   if not exists (
