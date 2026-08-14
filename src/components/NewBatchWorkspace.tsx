@@ -1299,7 +1299,7 @@ export default function NewBatchWorkspace({
             Upload a fresh batch of generated questions here for a completely separate validation pass — this pool never touches the main Curator data until you explicitly merge it in.
           </p>
         </div>
-        <div className="relative z-10 flex gap-2 w-full md:w-auto">
+        <div className="relative z-10 flex flex-wrap gap-2 w-full md:w-auto">
           {isAdmin && (
             <>
               <div className="relative flex-1 md:flex-none md:w-52">
