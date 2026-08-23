@@ -123,21 +123,32 @@ export default function App() {
       setPendingApproval(false);
       return;
     }
-    supabase
-      .from('profiles')
-      .select('id, email, name, role, active')
-      .eq('id', session.user.id)
-      .single()
-      .then(({ data, error }) => {
-        if (!error && data) {
-          if (!(data as Profile).active) {
-            setPendingApproval(true);
-            return;
+    let cancelled = false;
+    const fetchProfile = (isRetry: boolean) => {
+      supabase
+        .from('profiles')
+        .select('id, email, name, role, active')
+        .eq('id', session.user.id)
+        .single()
+        .then(({ data, error }) => {
+          if (cancelled) return;
+          if (!error && data) {
+            if (!(data as Profile).active) {
+              setPendingApproval(true);
+              return;
+            }
+            setPendingApproval(false);
+            setProfile(data as Profile);
+          } else if (!isRetry) {
+            // Transient failure (e.g. token not yet propagated on reload) —
+            // retry once instead of leaving profile null, which silently
+            // dropped the display name and admin tag.
+            setTimeout(() => fetchProfile(true), 800);
           }
-          setPendingApproval(false);
-          setProfile(data as Profile);
-        }
-      });
+        });
+    };
+    fetchProfile(false);
+    return () => { cancelled = true; };
   }, [session]);
 
   const validatorName = profile?.name || session?.user.email || 'Unnamed Validator';

@@ -204,6 +204,7 @@ export default function NewBatchWorkspace({
           .from(TABLE_NAME)
           .select('*')
           .order('created_at', { ascending: false })
+          .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
         if (qError || !qRows) break;
         if (first) {
