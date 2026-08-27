@@ -334,15 +334,20 @@ export default function NewBatchWorkspace({
   };
 
   const deleteAllQuestions = async () => {
-    const idsToDelete = questions.map(q => q.id).filter(Boolean);
-    if (idsToDelete.length === 0) {
-      setQuestions([]);
-      return true;
-    }
-    const { error } = await supabase.from(TABLE_NAME).delete().neq('id', '');
-    if (error) {
-      showToast(`Failed to wipe the New Batch workspace: ${error.message}`, 'error');
-      return false;
+    if (questions.length > 0) {
+      const exportList = questions.map(buildExportRecord);
+      const blob = new Blob([JSON.stringify(exportList, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute('href', url);
+      downloadAnchor.setAttribute('download', `new-batch-auto-export-${Date.now()}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      setTimeout(() => {
+        document.body.removeChild(downloadAnchor);
+        URL.revokeObjectURL(url);
+      }, 100);
+      showToast(`Exported ${questions.length} question(s) from New Batch before wiping.`, 'success');
     }
     setQuestions([]);
     return true;
@@ -1293,7 +1298,7 @@ export default function NewBatchWorkspace({
   return (
     <>
       {/* Banner + upload */}
-      <div className="mb-6 bg-gradient-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
+      <div className="mb-6 bg-linear-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
         <div className="relative z-10 space-y-1">
           <h2 className="text-base font-bold tracking-tight">New Batch — Isolated Review Queue</h2>
           <p className="text-xs text-zinc-500 font-normal leading-relaxed max-w-xl">
@@ -1351,7 +1356,7 @@ export default function NewBatchWorkspace({
                 </button>
 
                 {isExportMenuOpen && (
-                  <div className="absolute right-0 mt-1.5 w-[22rem] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
+                  <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
                     {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
                       const count = questionsInBucket(bucket).length;
                       const isEmpty = count === 0;
@@ -1443,7 +1448,7 @@ export default function NewBatchWorkspace({
           <select
             value={batchFilter}
             onChange={(e) => setBatchFilter(e.target.value)}
-            className="flex-1 min-w-[14rem] px-3 py-2 text-xs font-semibold rounded-lg border border-[#e4e4e7] bg-white text-zinc-900 focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1] cursor-pointer"
+            className="flex-1 min-w-56 px-3 py-2 text-xs font-semibold rounded-lg border border-[#e4e4e7] bg-white text-zinc-900 focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1] cursor-pointer"
           >
             <option value="all">All batches ({questions.length})</option>
             {batchGroups.map(g => (
@@ -1675,7 +1680,7 @@ export default function NewBatchWorkspace({
           const scopeLabel = bulkConfirm.actionType === 'approve_filtered' || bulkConfirm.actionType === 'reject_filtered' ? 'currently filtered' : 'manually selected';
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isSubmittingBulk && setBulkConfirm(null)} className="absolute inset-0 bg-[#000]/90" />
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isSubmittingBulk && setBulkConfirm(null)} className="absolute inset-0 bg-black/90" />
               <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 10 }} className="relative w-full max-w-md bg-[#fafafa] border border-[#e4e4e7] rounded-2xl p-6 shadow-2xl overflow-hidden z-10">
                 <div className="flex items-start gap-4">
                   <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 border ${isApprove ? 'bg-emerald-50 border-emerald-500/30 text-emerald-600' : 'bg-rose-50 border-rose-500/30 text-rose-500'}`}>
@@ -1712,7 +1717,7 @@ export default function NewBatchWorkspace({
       <AnimatePresence>
         {isClearConfirmOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsClearConfirmOpen(false)} className="absolute inset-0 bg-[#000]/90" />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsClearConfirmOpen(false)} className="absolute inset-0 bg-black/90" />
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 10 }} className="relative w-full max-w-md bg-[#fafafa] border border-[#e4e4e7] rounded-2xl p-6 shadow-2xl overflow-hidden z-10">
               <div className="flex items-start gap-4">
                 <div className="w-10 h-10 rounded-full bg-rose-50 border border-rose-500/30 flex items-center justify-center text-rose-500 shrink-0">
@@ -1758,7 +1763,7 @@ export default function NewBatchWorkspace({
           const typedOk = removeBatchTypedText.trim().toUpperCase() === 'DELETE';
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isRemovingBatch && setRemoveBatchModalOpen(false)} className="absolute inset-0 bg-[#000]/90" />
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isRemovingBatch && setRemoveBatchModalOpen(false)} className="absolute inset-0 bg-black/90" />
               <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 10 }} className="relative w-full max-w-md bg-[#fafafa] border border-[#e4e4e7] rounded-2xl p-6 shadow-2xl overflow-hidden z-10">
                 <div className="flex items-start gap-4">
                   <div className="w-10 h-10 rounded-full bg-rose-50 border border-rose-500/30 flex items-center justify-center text-rose-500 shrink-0">
@@ -1799,7 +1804,7 @@ export default function NewBatchWorkspace({
       <AnimatePresence>
         {mergeModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isMerging && setMergeModalOpen(false)} className="absolute inset-0 bg-[#000]/90" />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !isMerging && setMergeModalOpen(false)} className="absolute inset-0 bg-black/90" />
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 10 }} className="relative w-full max-w-md bg-[#fafafa] border border-[#e4e4e7] rounded-2xl p-6 shadow-2xl overflow-hidden z-10">
               <div className="flex items-start gap-4">
                 <div className="w-10 h-10 rounded-full bg-indigo-50 border border-indigo-500/30 flex items-center justify-center text-[#4f46e5] shrink-0">

@@ -378,21 +378,40 @@ export default function App() {
         from += PAGE;
       }
 
-      const { data: logRows, error: lError } = await supabase
+      const start14DaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+      const { count } = await supabase
         .from('audit_log')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(1000);
-      if (!cancelled && !lError && logRows) {
-        setLogs(logRows.map((r: any) => ({
-          id: r.id,
-          timestamp: new Date(r.timestamp).toLocaleString(),
-          rawTimestamp: r.timestamp,
-          action: r.action,
-          questionId: r.question_id || undefined,
-          description: r.description,
-          user: r.user_name || undefined
-        })));
+        .select('id', { count: 'exact', head: true })
+        .gte('timestamp', start14DaysAgo);
+
+      if (!cancelled && count && count > 0) {
+        const PAGE = 1000;
+        const totalPages = Math.ceil(count / PAGE);
+        const pagePromises = Array.from({ length: totalPages }, (_, i) =>
+          supabase
+            .from('audit_log')
+            .select('id, timestamp, action, question_id, description, user_name, user_id')
+            .gte('timestamp', start14DaysAgo)
+            .order('timestamp', { ascending: false })
+            .range(i * PAGE, (i + 1) * PAGE - 1)
+        );
+        const results = await Promise.all(pagePromises);
+        const allRows: any[] = [];
+        for (const res of results) {
+          if (res.data) allRows.push(...res.data);
+        }
+        if (!cancelled) {
+          setLogs(allRows.map((r: any) => ({
+            id: r.id,
+            timestamp: new Date(r.timestamp).toLocaleString(),
+            rawTimestamp: r.timestamp,
+            action: r.action,
+            questionId: r.question_id || undefined,
+            description: r.description,
+            user: r.user_name || undefined,
+            userId: r.user_id || undefined
+          })));
+        }
       }
     })();
 
@@ -437,7 +456,8 @@ export default function App() {
           action: r.action,
           questionId: r.question_id || undefined,
           description: r.description,
-          user: r.user_name || undefined
+          user: r.user_name || undefined,
+          userId: r.user_id || undefined
         }, ...prev]);
       })
       .subscribe();
@@ -550,23 +570,63 @@ export default function App() {
     }
   };
 
-  // --- Bug fix: "Wipe Workspace" used to call saveQuestions([]), which never
-  // issues a delete (see note above), so wiped rows silently reappeared on
-  // reload. This explicitly deletes every row currently loaded, then clears
-  // local state only once the delete has actually succeeded. ---
+  // --- "Wipe Workspace": Automatically exports all questions and data as JSON,
+  // then clears local workspace state only without deleting database records. ---
   const deleteAllQuestions = async () => {
-    const idsToDelete = questions.map(q => q.id).filter(Boolean);
-    if (idsToDelete.length === 0) {
-      setQuestions([]);
-      return true;
-    }
-    // Delete every row unconditionally rather than matching a per-id IN-list —
-    // a large or special-character-containing id list can break the IN-list
-    // query syntax and return a 400 Bad Request even for a real admin.
-    const { error } = await supabase.from('questions').delete().neq('id', '');
-    if (error) {
-      showToast(`Failed to wipe workspace: ${error.message}`, 'error');
-      return false;
+    if (questions.length > 0) {
+      const exportList = questions.map(q => ({
+        id: q.id,
+        section: q.Section || q.section || null,
+        category: q.category,
+        subSkill: q.subSkill || null,
+        questionType: q.questionType || 'mcq',
+        difficulty: q.difficulty,
+        passage: q.passage,
+        stimulus: q.stimulus || null,
+        imageUrl: q.imageUrl || null,
+        question: q.question,
+        choices: q.choices,
+        correct_answer: q.correct_answer,
+        explanation: q.explanation,
+        reviewStatus: q.reviewStatus || 'pending',
+        reviewedBy: q.claimedByName || q.assignedToName || null,
+        claimedBy: q.claimedByName || null,
+        claimedAt: q.claimedAt || null,
+        assignedTo: q.assignedToName || null,
+        checklist: {
+          formationOk: q.formationOk ?? null,
+          answerOk: q.answerOk ?? null,
+          categoryOk: q.categoryOk ?? null,
+          categoryOverride: q.categoryOverride || null,
+          difficultyOk: q.difficultyOk ?? null,
+          difficultyOverride: q.difficultyOverride || null
+        },
+        statusOverride: q.statusOverride || null,
+        statusOverrideJustification: q.statusOverrideJustification || null,
+        reviewerNote: q.reviewerNote || null,
+        comments: q.comments || [],
+        consensusReviews: q.consensusReviews || [],
+        requiresSecondReview: q.requiresSecondReview || false,
+        pipelineValidatorStatus: q.validatorStatus || null,
+        pipelineValidatorFeedback: q.validatorFeedback || null,
+        similarityScore: typeof q.similarity_score === 'number' ? q.similarity_score : null,
+        similarQuestionId: q.similar_question_id || null,
+        generatorRunId: q.generatorRunId || null,
+        createdAt: q.createdAt || null
+      }));
+
+      const blob = new Blob([JSON.stringify(exportList, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute('href', url);
+      downloadAnchor.setAttribute('download', `curation-workspace-auto-export-${Date.now()}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      setTimeout(() => {
+        document.body.removeChild(downloadAnchor);
+        URL.revokeObjectURL(url);
+      }, 100);
+      showToast(`Exported ${questions.length} question(s) before wiping workspace.`, 'success');
     }
     setQuestions([]);
     return true;
@@ -1957,7 +2017,7 @@ export default function App() {
               title={session?.user.email}
             >
               <User className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-              <span className="text-xs text-zinc-700 max-w-[120px] truncate">{validatorName}</span>
+              <span className="text-xs text-zinc-700 max-w-30 truncate">{validatorName}</span>
               {isAdmin && (
                 <span className="flex items-center gap-1 text-[11px] font-bold px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 border border-indigo-200">
                   <ShieldCheck className="w-2.5 h-2.5" /> ADMIN
@@ -2021,7 +2081,7 @@ export default function App() {
                   </button>
 
                   {isExportMenuOpen && (
-                    <div className="absolute right-0 mt-1.5 w-[22rem] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
+                    <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
                       {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
                         const count = questionsInBucket(bucket).length;
                         const isEmpty = count === 0;
@@ -2075,7 +2135,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
 
         {/* Banner callout */}
-        <div className="mb-6 bg-gradient-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative overflow-hidden flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
+        <div className="mb-6 bg-linear-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative overflow-hidden flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
           <div className="relative z-10 space-y-1">
             <h2 className="text-base font-bold tracking-tight">Curation Action Center</h2>
             <p className="text-xs text-zinc-500 font-normal leading-relaxed max-w-xl">
@@ -2219,26 +2279,28 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'audit' && (
+        <div className={activeTab === 'audit' ? 'block' : 'hidden'}>
           <AuditActivityLogs
             logs={logs}
             onClearLogs={handleClearLogs}
           />
-        )}
+        </div>
 
-        {activeTab === 'admin' && isAdmin && (
-          <AdminPanel
-            questions={questions}
-            logs={logs}
-            validators={validators}
-            invites={invites}
-            onRefreshInvites={refreshInvites}
-            onRefreshValidators={refreshValidators}
-            settings={settings}
-            onSettingsSaved={setSettings}
-            onResolveConsensus={handleResolveConsensus}
-            onOpenValidatorProgress={() => setShowValidatorProgressModal(true)}
-          />
+        {isAdmin && (
+          <div className={activeTab === 'admin' ? 'block' : 'hidden'}>
+            <AdminPanel
+              questions={questions}
+              logs={logs}
+              validators={validators}
+              invites={invites}
+              onRefreshInvites={refreshInvites}
+              onRefreshValidators={refreshValidators}
+              settings={settings}
+              onSettingsSaved={setSettings}
+              onResolveConsensus={handleResolveConsensus}
+              onOpenValidatorProgress={() => setShowValidatorProgressModal(true)}
+            />
+          </div>
         )}
 
         {activeTab === 'curator' && (
@@ -2600,7 +2662,7 @@ export default function App() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 onClick={() => !isSubmittingBulk && setBulkConfirm(null)}
-                className="absolute inset-0 bg-[#000]/90"
+                className="absolute inset-0 bg-black/90"
               />
               <motion.div
                 initial={{ opacity: 0, scale: 0.95, y: 10 }}
@@ -2673,7 +2735,7 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsClearConfirmOpen(false)}
-              className="absolute inset-0 bg-[#000]/90"
+              className="absolute inset-0 bg-black/90"
             />
 
             {/* Modal Content */}
@@ -2738,7 +2800,7 @@ export default function App() {
             className="fixed bottom-6 right-6 z-50 p-4 rounded-xl border shadow-2xl flex items-center gap-3 max-w-md bg-[#fafafa] text-zinc-900 border-[#e4e4e7]"
           >
             <div className="w-6 h-6 rounded-full bg-[#f2f2f3] flex items-center justify-center shrink-0 border border-[#e4e4e7]">
-              <Check className="w-3.5 h-3.5 text-emerald-600 stroke-[3]" />
+              <Check className="w-3.5 h-3.5 text-emerald-600 stroke-3" />
             </div>
             <p className="text-xs font-medium leading-normal text-zinc-700">{toast.message}</p>
           </motion.div>

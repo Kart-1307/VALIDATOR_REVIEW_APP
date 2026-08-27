@@ -16,6 +16,7 @@ import {
   Clock,
   Filter
 } from 'lucide-react';
+import { supabase } from '../lib/supabaseClient';
 
 export interface AuditLogEntry {
   id: string;
@@ -25,6 +26,7 @@ export interface AuditLogEntry {
   questionId?: string;
   description: string;
   user?: string;
+  userId?: string;
 }
 
 interface AuditActivityLogsProps {
@@ -35,6 +37,7 @@ interface AuditActivityLogsProps {
 export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLogsProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [actionFilter, setActionFilter] = useState<string>('all');
+  const [visibleCount, setVisibleCount] = useState<number>(100);
 
   const filteredLogs = useMemo(() => {
     return logs.filter(log => {
@@ -108,11 +111,52 @@ export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLo
     }
   };
 
-  const handleDownloadLogJSON = () => {
-    if (logs.length === 0) return;
+  const [isExporting, setIsExporting] = useState(false);
+
+  // Helper to fetch 100% of all historical audit logs directly from Supabase with batch pagination
+  const fetchAllAuditLogsFromSupabase = async (): Promise<AuditLogEntry[]> => {
+    setIsExporting(true);
+    try {
+      const allRows: any[] = [];
+      let from = 0;
+      const PAGE = 1000;
+      while (true) {
+        const { data, error } = await supabase
+          .from('audit_log')
+          .select('*')
+          .order('timestamp', { ascending: false })
+          .range(from, from + PAGE - 1);
+        if (error || !data || data.length === 0) break;
+        allRows.push(...data);
+        if (data.length < PAGE) break;
+        from += PAGE;
+      }
+
+      if (allRows.length === 0) return logs;
+
+      return allRows.map((r: any) => ({
+        id: r.id,
+        timestamp: new Date(r.timestamp).toLocaleString(),
+        rawTimestamp: r.timestamp,
+        action: r.action,
+        questionId: r.question_id || undefined,
+        description: r.description,
+        user: r.user_name || undefined,
+        userId: r.user_id || undefined
+      }));
+    } catch (err) {
+      return logs;
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleDownloadLogJSON = async () => {
+    const fullLogs = await fetchAllAuditLogsFromSupabase();
+    if (fullLogs.length === 0) return;
     
     const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(
-      JSON.stringify(logs, null, 2)
+      JSON.stringify(fullLogs, null, 2)
     )}`;
     
     const downloadAnchor = document.createElement('a');
@@ -124,8 +168,9 @@ export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLo
   };
 
   // --- Spec §8: Exportable audit report (CSV) for QA/compliance ---
-  const handleDownloadLogCSV = () => {
-    if (logs.length === 0) return;
+  const handleDownloadLogCSV = async () => {
+    const fullLogs = await fetchAllAuditLogsFromSupabase();
+    if (fullLogs.length === 0) return;
 
     const escapeCsv = (val: string | undefined) => {
       const s = (val ?? '').replace(/"/g, '""');
@@ -133,7 +178,7 @@ export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLo
     };
 
     const header = ['Log ID', 'Timestamp', 'Action', 'Question ID', 'Validator', 'Description'];
-    const rows = logs.map(log => [
+    const rows = fullLogs.map(log => [
       escapeCsv(log.id),
       escapeCsv(log.timestamp),
       escapeCsv(log.action),
@@ -198,29 +243,31 @@ export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLo
           {/* Action Button: Download */}
           <button
             onClick={handleDownloadLogJSON}
-            disabled={logs.length === 0}
+            disabled={logs.length === 0 || isExporting}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
-              logs.length === 0
-                ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+              logs.length === 0 || isExporting
+                ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed opacity-60'
                 : 'bg-[#f2f2f3] hover:bg-[#e4e4e7] text-zinc-600 border-[#e4e4e7]'
             }`}
-            title="Download full curator activity session log"
+            title="Download 100% complete curator activity log directly from database"
           >
-            <Download className="w-3.5 h-3.5" /> Download Logs JSON
+            {isExporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {isExporting ? 'Fetching All Logs...' : 'Download Logs JSON'}
           </button>
 
           {/* Action Button: Download CSV (spec §8: exportable audit report for QA/compliance) */}
           <button
             onClick={handleDownloadLogCSV}
-            disabled={logs.length === 0}
+            disabled={logs.length === 0 || isExporting}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
-              logs.length === 0
-                ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+              logs.length === 0 || isExporting
+                ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed opacity-60'
                 : 'bg-[#f2f2f3] hover:bg-[#e4e4e7] text-zinc-600 border-[#e4e4e7]'
             }`}
-            title="Export audit trail as CSV for QA/compliance"
+            title="Export 100% complete audit trail as CSV directly from database"
           >
-            <Download className="w-3.5 h-3.5" /> Export CSV
+            {isExporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {isExporting ? 'Fetching All Logs...' : 'Export CSV'}
           </button>
 
           {/* Action Button: Clear */}
@@ -259,9 +306,9 @@ export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLo
           per spec §8. "Clear" below only clears your local view; the underlying record is untouched and reappears on refresh.
         </div>
 
-        <div className="p-5 max-h-[500px] overflow-y-auto space-y-4">
+        <div className="p-5 max-h-125 overflow-y-auto space-y-4">
           <AnimatePresence mode="popLayout">
-            {filteredLogs.map((log) => {
+            {filteredLogs.slice(0, visibleCount).map((log) => {
               const styles = getActionStyles(log.action);
               return (
                 <motion.div
@@ -306,6 +353,18 @@ export default function AuditActivityLogs({ logs, onClearLogs }: AuditActivityLo
                 </motion.div>
               );
             })}
+
+            {filteredLogs.length > visibleCount && (
+              <div className="pt-3 text-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount(prev => prev + 100)}
+                  className="px-4 py-2 text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-all cursor-pointer shadow-sm"
+                >
+                  Show More Logs (Displaying {visibleCount} of {filteredLogs.length})
+                </button>
+              </div>
+            )}
 
             {filteredLogs.length === 0 && (
               <div className="text-center py-12 text-zinc-500 text-xs italic">

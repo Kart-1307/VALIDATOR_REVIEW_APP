@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Users, Activity, Clock, Scale, Save, Webhook, UserPlus, Trash, Calendar, Percent, AlertCircle, AlertTriangle, FileSpreadsheet, CalendarClock, ListPlus, MessageSquare, CheckCircle2, XCircle, RotateCcw } from 'lucide-react';
 import { SATQuestion, ValidatorInvite, MAX_CONSENSUS_REVIEWERS } from '../types';
 import { AuditLogEntry } from './AuditActivityLogs';
@@ -20,13 +20,15 @@ interface AdminPanelProps {
   onOpenValidatorProgress?: () => void;
 }
 
-// yyyy-mm-dd in the browser's local timezone — matches the <input type="date"> value
-// and mirrors the same helper in ValidatorProgressModal.tsx.
-const toLocalDateKey = (d: Date) => {
-  const y = d.getFullYear();
-  const m = `${d.getMonth() + 1}`.padStart(2, '0');
-  const day = `${d.getDate()}`.padStart(2, '0');
-  return `${y}-${m}-${day}`;
+// yyyy-mm-dd in India Standard Time (Asia/Kolkata) — ensures all global validator activity is grouped under India workdays
+const toLocalDateKey = (d: Date | string) => {
+  const dateObj = typeof d === 'string' ? new Date(d) : d;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(dateObj);
 };
 const todayKey = () => toLocalDateKey(new Date());
 
@@ -55,6 +57,20 @@ export default function AdminPanel({
   const [rateDraft, setRateDraft] = useState(Math.round((settings.consensus_sample_rate || 0.1) * 100));
   const [savingSettings, setSavingSettings] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  // Fetch New Batch Workspace (questions_batch2) metadata for complete dataset parity
+  const [batch2Questions, setBatch2Questions] = useState<any[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from('questions_batch2')
+      .select('id, review_status, claimed_by_name, assigned_to_name, created_at, updated_at, comments')
+      .then(({ data, error }) => {
+        if (cancelled || error || !data) return;
+        setBatch2Questions(data);
+      });
+    return () => { cancelled = true; };
+  }, [logs]);
 
   // --- §2: role / active management ---
   const updateValidator = async (id: string, patch: Partial<Pick<Profile, 'role' | 'active'>>) => {
@@ -133,51 +149,106 @@ export default function AdminPanel({
     }
   };
 
-  // --- §9: throughput per validator per day (all time approve/reject actions) ---
+  // Lookup map to normalize user names across logs using profile ID, email, or name
+  const userCanonicalNameMap = useMemo(() => {
+    const map = new Map<string, string>();
+    validators.forEach(v => {
+      const canonical = v.name || v.email;
+      if (v.id) map.set(v.id.toLowerCase(), canonical);
+      if (v.email) map.set(v.email.toLowerCase(), canonical);
+      if (v.name) map.set(v.name.toLowerCase(), canonical);
+    });
+    return map;
+  }, [validators]);
+
+  const getCanonicalUserName = (l: AuditLogEntry) => {
+    if (l.userId && userCanonicalNameMap.has(l.userId.toLowerCase())) {
+      return userCanonicalNameMap.get(l.userId.toLowerCase())!;
+    }
+    if (l.user && userCanonicalNameMap.has(l.user.toLowerCase())) {
+      return userCanonicalNameMap.get(l.user.toLowerCase())!;
+    }
+    return l.user || 'Unknown Curator';
+  };
+
+  // --- Daily Snapshot date & full day logs state ---
+  const [snapshotDate, setSnapshotDate] = useState<string>(todayKey());
+
+  // Logs helper: uses logs prop directly (pre-fetched by App.tsx) as the single source of truth for 0ms instant rendering
+  const effectiveLogs = logs;
+
+  // Logs specifically for the selected snapshotDate in Daily Snapshot
+  const fullDayLogs = useMemo(() => {
+    return logs.filter(l => l.rawTimestamp && toLocalDateKey(l.rawTimestamp) === snapshotDate);
+  }, [logs, snapshotDate]);
+
+  // Helper: check if a log entry represents a completed evaluation decision (Approved, Rejected, or Needs Revision)
+  const isDecisionLog = (l: AuditLogEntry) =>
+    l.action === 'approve' ||
+    l.action === 'reject' ||
+    isNeedsRevisionLog(l.description);
+
+  // --- §9: throughput per validator per day (deduplicated by unique completed decision questions touched in IST) ---
   const dailyThroughput = useMemo(() => {
-    // Bug fix: grouping used to key by `toLocaleDateString()` (e.g. "7/28/2026"
-    // or "28/7/2026" depending on the browser's locale) and then re-parse that
-    // same string with `new Date()` to sort. Date parsing of locale-formatted
-    // strings isn't standardized across browsers/locales, so this could
-    // silently produce Invalid Date (NaN) and an unreliable sort order in
-    // non-US locales. Group by a stable ISO date key and only format for
-    // display at render time.
-    const dailyMap: Record<string, Record<string, number>> = {};
-    logs.forEach(l => {
-      if (!l.rawTimestamp || (l.action !== 'approve' && l.action !== 'reject')) return;
-      const dateKey = new Date(l.rawTimestamp).toISOString().slice(0, 10); // YYYY-MM-DD
-      const userKey = l.user || 'Unknown Curator';
+    const dailyMap: Record<string, Record<string, { actions: number; questionIds: Set<string> }>> = {};
+    effectiveLogs.forEach(l => {
+      if (!l.rawTimestamp) return;
+      const dateKey = toLocalDateKey(l.rawTimestamp);
+      const userKey = getCanonicalUserName(l);
       if (!dailyMap[dateKey]) {
         dailyMap[dateKey] = {};
       }
-      dailyMap[dateKey][userKey] = (dailyMap[dateKey][userKey] || 0) + 1;
+      if (!dailyMap[dateKey][userKey]) {
+        dailyMap[dateKey][userKey] = { actions: 0, questionIds: new Set() };
+      }
+      dailyMap[dateKey][userKey].actions += 1;
+      // Strict rule: ONLY count questions that have a completed decision (Approved, Rejected, or Needs Revision)
+      if (l.questionId && isDecisionLog(l)) {
+        dailyMap[dateKey][userKey].questionIds.add(l.questionId);
+      }
     });
 
-    const entries: { date: string; displayDate: string; user: string; count: number }[] = [];
+    const entries: { date: string; displayDate: string; user: string; uniqueQuestions: number; actions: number }[] = [];
     Object.entries(dailyMap).forEach(([date, userMap]) => {
-      const displayDate = new Date(`${date}T00:00:00`).toLocaleDateString();
-      Object.entries(userMap).forEach(([user, count]) => {
-        entries.push({ date, displayDate, user, count });
+      const displayDate = date;
+      Object.entries(userMap).forEach(([user, stats]) => {
+        entries.push({
+          date,
+          displayDate,
+          user,
+          uniqueQuestions: stats.questionIds.size,
+          actions: stats.actions
+        });
       });
     });
 
-    // Sort by the stable ISO key descending (plain string comparison works
-    // correctly for YYYY-MM-DD).
     return entries.sort((a, b) => b.date.localeCompare(a.date));
-  }, [logs]);
+  }, [effectiveLogs, userCanonicalNameMap]);
 
-  // --- §9: throughput per validator (last 14 days summary) ---
+  // --- §9: throughput per validator (last 14 days summary: completed decision questions in IST) ---
   const throughputSummary = useMemo(() => {
     const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
-    const byValidator: Record<string, number> = {};
-    logs.forEach(l => {
-      if (!l.rawTimestamp || (l.action !== 'approve' && l.action !== 'reject')) return;
+    const byValidatorQuestions: Record<string, Set<string>> = {};
+    const actionsByValidator: Record<string, number> = {};
+    effectiveLogs.forEach(l => {
+      if (!l.rawTimestamp) return;
       if (new Date(l.rawTimestamp).getTime() < cutoff) return;
-      const key = l.user || 'Unknown';
-      byValidator[key] = (byValidator[key] || 0) + 1;
+      const key = getCanonicalUserName(l);
+      if (!byValidatorQuestions[key]) {
+        byValidatorQuestions[key] = new Set();
+        actionsByValidator[key] = 0;
+      }
+      actionsByValidator[key] += 1;
+      // Strict rule: ONLY count questions that have a completed decision (Approved, Rejected, or Needs Revision)
+      if (l.questionId && isDecisionLog(l)) {
+        byValidatorQuestions[key].add(l.questionId);
+      }
     });
-    return Object.entries(byValidator).sort((a, b) => b[1] - a[1]);
-  }, [logs]);
+    return Object.keys(actionsByValidator).map(user => {
+      const count = byValidatorQuestions[user].size;
+      return [user, count] as [string, number];
+    }).sort((a, b) => b[1] - a[1]);
+  }, [effectiveLogs, userCanonicalNameMap]);
   const maxThroughputSummary = Math.max(1, ...throughputSummary.map(([, n]) => n));
 
   // --- §9: pass/fail/revision rates by category and difficulty ---
@@ -305,44 +376,158 @@ export default function AdminPanel({
   }, [questions]);
 
   // --- Daily Snapshot: admin day-at-a-glance view of a single day's activity ---
-  const [snapshotDate, setSnapshotDate] = useState<string>(todayKey());
   const dailySnapshot = useMemo(() => {
-    const dayLogs = logs.filter(l => l.rawTimestamp && toLocalDateKey(new Date(l.rawTimestamp)) === snapshotDate);
+    const dayLogs = fullDayLogs.length > 0
+      ? fullDayLogs
+      : logs.filter(l => l.rawTimestamp && toLocalDateKey(l.rawTimestamp) === snapshotDate);
 
-    const approved = dayLogs.filter(l => l.action === 'approve').length;
-    const rejected = dayLogs.filter(l => l.action === 'reject').length;
-    const needsRevision = dayLogs.filter(l => isNeedsRevisionLog(l.description)).length;
+    // Helper: logs array is sorted newest-first (index 0), so first decision match is the latest decision
+    const getLatestDecision = (qLogs: AuditLogEntry[]): 'approved' | 'rejected' | 'needs_revision' | null => {
+      for (let i = 0; i < qLogs.length; i++) {
+        const l = qLogs[i];
+        if (l.action === 'approve') return 'approved';
+        if (l.action === 'reject') return 'rejected';
+        if (isNeedsRevisionLog(l.description)) return 'needs_revision';
+      }
+      return null;
+    };
+
+    // Helper: extract numeric bulk count from log description strings if present (e.g. "Approved 116 items in bulk")
+    const parseBulkCount = (desc: string): number => {
+      const match = desc.match(/\b(?:approved|rejected|merged|cleared|restored|exported)\s+(\d+)\s+item/i) ||
+        desc.match(/\b(\d+)\s+item\(s\)/i) ||
+        desc.match(/\b(\d+)\s+question\(s\)/i);
+      return match ? parseInt(match[1], 10) : 0;
+    };
+
+    // Group logs by questionId for overall day stats
+    const dayLogsByQuestion = new Map<string, AuditLogEntry[]>();
+    dayLogs.forEach(l => {
+      if (!l.questionId) return;
+      if (!dayLogsByQuestion.has(l.questionId)) {
+        dayLogsByQuestion.set(l.questionId, []);
+      }
+      dayLogsByQuestion.get(l.questionId)!.push(l);
+    });
+
+    let overallApproved = 0;
+    let overallRejected = 0;
+    let overallNeedsRevision = 0;
+
+    dayLogsByQuestion.forEach((qLogs) => {
+      const decision = getLatestDecision(qLogs);
+      if (decision === 'approved') overallApproved++;
+      else if (decision === 'rejected') overallRejected++;
+      else if (decision === 'needs_revision') overallNeedsRevision++;
+    });
+
     const claimed = dayLogs.filter(l => isClaimLog(l.description)).length;
     const comments = dayLogs.filter(l => isCommentLog(l.description)).length;
-    const newQuestions = questions.filter(q => q.createdAt && toLocalDateKey(new Date(q.createdAt)) === snapshotDate).length;
+    const newQuestions = questions.filter(q => q.createdAt && toLocalDateKey(q.createdAt) === snapshotDate).length;
 
-    const perValidator: Record<string, { approved: number; rejected: number; needsRevision: number; total: number }> = {};
+    // Per-validator breakdown: combine log evidence + direct question state (questions & batch2) + bulk counts
+    const perValidatorLogs: Record<string, { total: number; questionLogs: Map<string, AuditLogEntry[]>; bulkItems: number }> = {};
     dayLogs.forEach(l => {
-      const key = l.user || 'Unknown Curator';
-      if (!perValidator[key]) {
-        perValidator[key] = { approved: 0, rejected: 0, needsRevision: 0, total: 0 };
+      const key = getCanonicalUserName(l);
+      if (!perValidatorLogs[key]) {
+        perValidatorLogs[key] = { total: 0, questionLogs: new Map(), bulkItems: 0 };
       }
-      perValidator[key].total += 1;
-      if (l.action === 'approve') perValidator[key].approved += 1;
-      else if (l.action === 'reject') perValidator[key].rejected += 1;
-      else if (isNeedsRevisionLog(l.description)) perValidator[key].needsRevision += 1;
+      perValidatorLogs[key].total += 1;
+      const bCount = parseBulkCount(l.description);
+      if (bCount > 1) {
+        perValidatorLogs[key].bulkItems += bCount;
+      }
+      if (l.questionId) {
+        if (!perValidatorLogs[key].questionLogs.has(l.questionId)) {
+          perValidatorLogs[key].questionLogs.set(l.questionId, []);
+        }
+        perValidatorLogs[key].questionLogs.get(l.questionId)!.push(l);
+      }
     });
-    const validatorRows = Object.entries(perValidator)
-      .map(([name, stats]) => ({ name, ...stats }))
-      .sort((a, b) => b.total - a.total);
+
+    // Also scan questions & batch2Questions for direct dataset matches for each validator today
+    validators.forEach(val => {
+      const name = val.name || val.email;
+      const nameLower = name.trim().toLowerCase();
+
+      // Check main Curator pool
+      questions.forEach(q => {
+        const isTouchedByVal =
+          ((q as any).claimedByName && (q as any).claimedByName.trim().toLowerCase() === nameLower) ||
+          ((q as any).assignedToName && (q as any).assignedToName.trim().toLowerCase() === nameLower) ||
+          (q.consensusReviews && q.consensusReviews.some(r => r.validatorName?.trim().toLowerCase() === nameLower)) ||
+          (q.comments && q.comments.some(c => c.author?.trim().toLowerCase() === nameLower));
+
+        const qDate = (q as any).updatedAt || q.createdAt;
+        if (isTouchedByVal && qDate && toLocalDateKey(qDate) === snapshotDate) {
+          if (!perValidatorLogs[name]) {
+            perValidatorLogs[name] = { total: 0, questionLogs: new Map(), bulkItems: 0 };
+          }
+          if (!perValidatorLogs[name].questionLogs.has(q.id)) {
+            perValidatorLogs[name].questionLogs.set(q.id, []);
+          }
+        }
+      });
+
+      // Check New Batch Workspace pool
+      batch2Questions.forEach(b2 => {
+        const isTouchedByVal =
+          (b2.claimed_by_name && b2.claimed_by_name.trim().toLowerCase() === nameLower) ||
+          (b2.assigned_to_name && b2.assigned_to_name.trim().toLowerCase() === nameLower) ||
+          (b2.comments && b2.comments.some((c: any) => c.author?.trim().toLowerCase() === nameLower));
+
+        const b2Date = b2.updated_at || b2.created_at;
+        if (isTouchedByVal && b2Date && toLocalDateKey(b2Date) === snapshotDate) {
+          if (!perValidatorLogs[name]) {
+            perValidatorLogs[name] = { total: 0, questionLogs: new Map(), bulkItems: 0 };
+          }
+          if (!perValidatorLogs[name].questionLogs.has(b2.id)) {
+            perValidatorLogs[name].questionLogs.set(b2.id, []);
+          }
+        }
+      });
+    });
+
+    const validatorRows = Object.entries(perValidatorLogs).map(([name, data]) => {
+      let vApproved = 0;
+      let vRejected = 0;
+      let vNeedsRevision = 0;
+
+      data.questionLogs.forEach((qLogs) => {
+        const decision = getLatestDecision(qLogs);
+        if (decision === 'approved') vApproved++;
+        else if (decision === 'rejected') vRejected++;
+        else if (decision === 'needs_revision') vNeedsRevision++;
+      });
+
+      const decidedCount = vApproved + vRejected + vNeedsRevision;
+      const uniqueQuestions = decidedCount > 0 ? Math.max(decidedCount, data.bulkItems) : data.questionLogs.size;
+
+      return {
+        name,
+        approved: vApproved,
+        rejected: vRejected,
+        needsRevision: vNeedsRevision,
+        total: data.total,
+        uniqueQuestions
+      };
+    }).sort((a, b) => b.uniqueQuestions - a.uniqueQuestions || b.total - a.total);
+
+    const totalEvaluatedDecisions = validatorRows.reduce((sum, r) => sum + r.uniqueQuestions, 0);
 
     return {
       totalActions: dayLogs.length,
-      approved,
-      rejected,
-      needsRevision,
+      uniqueQuestionsTotal: totalEvaluatedDecisions,
+      approved: overallApproved,
+      rejected: overallRejected,
+      needsRevision: overallNeedsRevision,
       claimed,
       comments,
       newQuestions,
       activeValidatorCount: validatorRows.length,
       validatorRows
     };
-  }, [logs, questions, snapshotDate]);
+  }, [fullDayLogs, logs, questions, batch2Questions, snapshotDate, userCanonicalNameMap, validators]);
 
   // --- Primary review vs. second-opinion disagreements awaiting admin resolution ---
   const disagreements = useMemo(() => {
@@ -580,36 +765,33 @@ export default function AdminPanel({
             </div>
             <span className="font-mono text-[11px] text-zinc-500 bg-white px-2.5 py-0.5 rounded-full border border-[#e4e4e7]">Per Validator / Per Day</span>
           </div>
-          <div className="overflow-x-auto">
+          <div className="max-h-80 overflow-y-auto overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
-              <thead>
-                <tr className="bg-[#f5f5f5] border-b border-[#e4e4e7] text-zinc-500 font-bold uppercase tracking-wider text-[11px] select-none">
+              <thead className="sticky top-0 bg-[#f5f5f5] z-10">
+                <tr className="border-b border-[#e4e4e7] text-zinc-500 font-bold uppercase tracking-wider text-[11px] select-none">
                   <th className="px-5 py-3">Date</th>
                   <th className="px-5 py-3">Validator / Curator</th>
-                  <th className="px-5 py-3 text-right">Throughput count</th>
+                  <th className="px-5 py-3 text-center">Unique Questions</th>
+                  <th className="px-5 py-3 text-right">Log Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#e4e4e7] bg-[#fafafa]">
-                {dailyThroughput.slice(0, 10).map((row, idx) => (
+                {dailyThroughput.map((row, idx) => (
                   <tr key={idx} className="hover:bg-[#f7f7f7] transition-all">
                     <td className="px-5 py-3 font-mono text-zinc-500">{row.displayDate}</td>
                     <td className="px-5 py-3 text-zinc-700 font-semibold">{row.user}</td>
-                    <td className="px-5 py-3 text-right text-sky-600 font-mono font-bold">{row.count} verdicts</td>
+                    <td className="px-5 py-3 text-center text-sky-600 font-mono font-bold">{row.uniqueQuestions} items</td>
+                    <td className="px-5 py-3 text-right text-zinc-500 font-mono text-[11px]">{row.actions} actions</td>
                   </tr>
                 ))}
                 {dailyThroughput.length === 0 && (
                   <tr>
-                    <td colSpan={3} className="px-5 py-8 text-center text-zinc-600 italic">No daily curation logs found.</td>
+                    <td colSpan={4} className="px-5 py-8 text-center text-zinc-600 italic">No daily curation logs found.</td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
-          {dailyThroughput.length > 10 && (
-            <div className="px-5 py-2.5 border-t border-[#e4e4e7] bg-[#f6f6f6] text-[11px] text-zinc-600 text-center font-mono select-none">
-              Showing top 10 daily summaries
-            </div>
-          )}
         </div>
       </div>
 
@@ -670,6 +852,7 @@ export default function AdminPanel({
             <thead>
               <tr className="bg-[#f5f5f5] border-b border-[#e4e4e7] text-zinc-500 font-bold uppercase tracking-wider text-[11px] select-none">
                 <th className="px-5 py-3">Validator / Curator</th>
+                <th className="px-5 py-3 text-center">Questions Evaluated</th>
                 <th className="px-5 py-3 text-center">Approved</th>
                 <th className="px-5 py-3 text-center">Rejected</th>
                 <th className="px-5 py-3 text-center">Needs Revision</th>
@@ -680,15 +863,16 @@ export default function AdminPanel({
               {dailySnapshot.validatorRows.map((row, idx) => (
                 <tr key={idx} className="hover:bg-[#f7f7f7] transition-all">
                   <td className="px-5 py-3 text-zinc-700 font-semibold">{row.name}</td>
+                  <td className="px-5 py-3 text-center font-mono text-indigo-600 font-bold">{row.uniqueQuestions}</td>
                   <td className="px-5 py-3 text-center font-mono text-emerald-600 font-bold">{row.approved}</td>
                   <td className="px-5 py-3 text-center font-mono text-rose-600 font-bold">{row.rejected}</td>
                   <td className="px-5 py-3 text-center font-mono text-amber-700 font-bold">{row.needsRevision}</td>
-                  <td className="px-5 py-3 text-right text-zinc-900 font-mono font-bold">{row.total}</td>
+                  <td className="px-5 py-3 text-right text-zinc-500 font-mono text-[11px]">{row.total}</td>
                 </tr>
               ))}
               {dailySnapshot.validatorRows.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-5 py-8 text-center text-zinc-600 italic">
+                  <td colSpan={6} className="px-5 py-8 text-center text-zinc-600 italic">
                     No activity logged for {new Date(`${snapshotDate}T00:00:00`).toLocaleDateString()}.
                   </td>
                 </tr>
@@ -698,7 +882,7 @@ export default function AdminPanel({
         </div>
         {dailySnapshot.validatorRows.length > 0 && (
           <div className="px-5 py-2.5 border-t border-[#e4e4e7] bg-[#f6f6f6] text-[11px] text-zinc-600 text-center font-mono select-none">
-            {dailySnapshot.activeValidatorCount} validator(s) active on {new Date(`${snapshotDate}T00:00:00`).toLocaleDateString()}
+            {dailySnapshot.activeValidatorCount} validator(s) active on {new Date(`${snapshotDate}T00:00:00`).toLocaleDateString()} • {dailySnapshot.uniqueQuestionsTotal} unique question(s) evaluated
           </div>
         )}
       </div>
@@ -725,7 +909,7 @@ export default function AdminPanel({
               <tbody className="divide-y divide-[#e4e4e7] bg-[#fafafa]">
                 {statusRates.categoryRates.map((row, idx) => (
                   <tr key={idx} className="hover:bg-[#f7f7f7] transition-all">
-                    <td className="px-5 py-3 text-zinc-700 font-semibold truncate max-w-[150px]" title={row.name}>{row.name}</td>
+                    <td className="px-5 py-3 text-zinc-700 font-semibold truncate max-w-37.5" title={row.name}>{row.name}</td>
                     <td className="px-5 py-3 text-center font-mono text-emerald-600 font-bold">{row.rates.pass}%</td>
                     <td className="px-5 py-3 text-center font-mono text-rose-600 font-bold">{row.rates.fail}%</td>
                     <td className="px-5 py-3 text-center font-mono text-amber-700 font-bold">{row.rates.revision}%</td>

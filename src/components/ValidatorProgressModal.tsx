@@ -50,12 +50,15 @@ const isComment = (d: string) => /commented on item/i.test(d);
 // matched and silently fell through to the generic 'Edited' tag instead.
 const stripBatchPrefix = (d: string) => d.replace(/^\[New Batch\]\s*/, '');
 
-// yyyy-mm-dd in the browser's local timezone — matches the <input type="date"> value
-const toLocalDateKey = (d: Date) => {
-  const y = d.getFullYear();
-  const m = `${d.getMonth() + 1}`.padStart(2, '0');
-  const day = `${d.getDate()}`.padStart(2, '0');
-  return `${y}-${m}-${day}`;
+// yyyy-mm-dd in India Standard Time (Asia/Kolkata) — matches AdminPanel.tsx timezone handling
+const toLocalDateKey = (d: Date | string) => {
+  const dateObj = typeof d === 'string' ? new Date(d) : d;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(dateObj);
 };
 
 const todayKey = () => toLocalDateKey(new Date());
@@ -139,9 +142,13 @@ export default function ValidatorProgressModal({
 
   // Builds one validator's activity across the selected date (or date range) from the audit log.
   const buildActivityForValidator = (validatorName: string) => {
-    const dayLogs = logs.filter(
-      l => (l.user || '') === validatorName && l.rawTimestamp && isDateInRange(toLocalDateKey(new Date(l.rawTimestamp)))
-    );
+    const targetLower = validatorName.trim().toLowerCase();
+    const dayLogs = logs.filter(l => {
+      if (!l.rawTimestamp || !isDateInRange(toLocalDateKey(new Date(l.rawTimestamp)))) return false;
+      const userLower = (l.user || '').trim().toLowerCase();
+      if (!userLower) return false;
+      return userLower === targetLower || targetLower.includes(userLower) || userLower.includes(targetLower);
+    });
 
     const perQuestion = new Map<string, QuestionActivity>();
     let commentsAdded = 0;
@@ -217,13 +224,13 @@ export default function ValidatorProgressModal({
 
   const detailColWidths = rangeMode === 'range' && rangeBounds.from !== rangeBounds.to
     ? [
-        { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
-        { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }, { wch: 12 }
-      ]
+      { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
+      { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }, { wch: 12 }
+    ]
     : [
-        { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
-        { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }
-      ];
+      { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
+      { wch: 22 }, { wch: 16 }, { wch: 50 }, { wch: 20 }, { wch: 12 }
+    ];
 
   const handleExport = () => {
     if (questions.length === 0 && logs.length === 0) {
@@ -374,18 +381,16 @@ export default function ValidatorProgressModal({
                 <button
                   type="button"
                   onClick={() => setRangeMode('single')}
-                  className={`flex-1 px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${
-                    rangeMode === 'single' ? 'bg-[#6366f1] text-white' : 'bg-white text-zinc-500 hover:bg-[#f2f2f3]'
-                  }`}
+                  className={`flex-1 px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${rangeMode === 'single' ? 'bg-[#6366f1] text-white' : 'bg-white text-zinc-500 hover:bg-[#f2f2f3]'
+                    }`}
                 >
                   Single Day
                 </button>
                 <button
                   type="button"
                   onClick={() => setRangeMode('range')}
-                  className={`flex-1 px-3 py-1.5 text-xs font-bold transition-all cursor-pointer border-l border-[#e4e4e7] ${
-                    rangeMode === 'range' ? 'bg-[#6366f1] text-white' : 'bg-white text-zinc-500 hover:bg-[#f2f2f3]'
-                  }`}
+                  className={`flex-1 px-3 py-1.5 text-xs font-bold transition-all cursor-pointer border-l border-[#e4e4e7] ${rangeMode === 'range' ? 'bg-[#6366f1] text-white' : 'bg-white text-zinc-500 hover:bg-[#f2f2f3]'
+                    }`}
                 >
                   Date Range
                 </button>
