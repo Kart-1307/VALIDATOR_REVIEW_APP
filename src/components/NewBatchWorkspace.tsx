@@ -94,12 +94,6 @@ export default function NewBatchWorkspace({
   const [questions, setQuestions] = useState<SATQuestion[]>([]);
   const [loaded, setLoaded] = useState(false);
   const pendingWritesRef = useRef<Map<string, number>>(new Map());
-  // See App.tsx for why this batching exists — Supabase Realtime fires one
-  // event per changed row, so an unbatched handler here costs O(n) per row
-  // during any multi-row action (worse the more rows this table has grown to).
-  const pendingQuestionEventsRef = useRef<Map<string, { eventType: string; new?: unknown; old?: unknown }>>(new Map());
-  const questionFlushTimerRef = useRef<number | null>(null);
-  const REALTIME_BATCH_MS = 60;
 
   const [filters, setFilters] = useState<FilterState>({
     search: '',
@@ -230,66 +224,35 @@ export default function NewBatchWorkspace({
       if (!cancelled) setLoaded(true);
     })();
 
-    const flushQuestionEvents = () => {
-      questionFlushTimerRef.current = null;
-      const pending = pendingQuestionEventsRef.current;
-      if (pending.size === 0) return;
-      const events = new Map(pending);
-      pending.clear();
-
-      setQuestions(prev => {
-        const byId = new Map(prev.map(q => [q.id, q] as const));
-        const order = prev.map(q => q.id);
-
-        events.forEach((payload, id) => {
-          if (payload.eventType === 'DELETE') {
-            byId.delete(id);
-            return;
-          }
-          const incoming = rowToBatch2Question(payload.new as Batch2Row);
-          if ((pendingWritesRef.current.get(incoming.id) || 0) > 0) return;
-          const existing = byId.get(id);
-          if (!existing) {
-            order.push(id);
-            byId.set(id, incoming);
-            return;
-          }
-          byId.set(id, {
-            ...incoming,
-            // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
-            passage: incoming.passage ?? existing.passage,
-            explanation: incoming.explanation || existing.explanation,
-            stimulus: incoming.stimulus ?? existing.stimulus,
-            question: incoming.question || existing.question,
-            choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : existing.choices,
-          });
-        });
-
-        return order.filter(id => byId.has(id)).map(id => byId.get(id)!);
-      });
-    };
-
-    const scheduleQuestionFlush = () => {
-      if (questionFlushTimerRef.current !== null) return;
-      questionFlushTimerRef.current = window.setTimeout(flushQuestionEvents, REALTIME_BATCH_MS);
-    };
-
     const channel = supabase
       .channel('questions-batch2-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: TABLE_NAME }, (payload) => {
-        const id = payload.eventType === 'DELETE' ? (payload.old as any).id : (payload.new as any).id;
-        pendingQuestionEventsRef.current.set(id, payload as any);
-        scheduleQuestionFlush();
+        setQuestions(prev => {
+          if (payload.eventType === 'DELETE') {
+            return prev.filter(q => q.id !== (payload.old as any).id);
+          }
+          const incoming = rowToBatch2Question(payload.new as Batch2Row);
+          if ((pendingWritesRef.current.get(incoming.id) || 0) > 0) return prev;
+          const exists = prev.some(q => q.id === incoming.id);
+          if (!exists) return [...prev, incoming];
+          return prev.map(q => {
+            if (q.id !== incoming.id) return q;
+            return {
+              ...incoming,
+              // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
+              passage: incoming.passage ?? q.passage,
+              explanation: incoming.explanation || q.explanation,
+              stimulus: incoming.stimulus ?? q.stimulus,
+              question: incoming.question || q.question,
+              choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : q.choices,
+            };
+          });
+        });
       })
       .subscribe();
 
     return () => {
       cancelled = true;
-      if (questionFlushTimerRef.current !== null) {
-        window.clearTimeout(questionFlushTimerRef.current);
-        questionFlushTimerRef.current = null;
-      }
-      pendingQuestionEventsRef.current.clear();
       supabase.removeChannel(channel);
     };
   }, []);
