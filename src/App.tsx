@@ -2033,26 +2033,11 @@ export default function App() {
               <LogOut className="w-4 h-4" />
             </button>
 
-            <span className="h-4 w-px bg-[#e4e4e7] mx-1" />
-
-            {/* Start Fresh options — not available to read-only auditors */}
-            {!isAuditor && (
-              <>
-                <button
-                  onClick={handleClearAllQuestions}
-                  title="Clear current workspace items"
-                  className="p-2 text-zinc-500 hover:text-rose-600 border border-[#e4e4e7] hover:bg-rose-50 rounded-lg transition-all cursor-pointer bg-[#fafafa]"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-
-                <span className="h-4 w-px bg-[#e4e4e7] mx-1" />
-              </>
-            )}
-
             {/* Exports are an admin-only action — validators/auditors never see these */}
             {isAdmin && (
               <>
+                <span className="h-4 w-px bg-[#e4e4e7] mx-1" />
+
                 {/* Distinct production question bank export (spec §10, §12, §13) — untouched */}
                 <button
                   onClick={downloadProductionBank}
@@ -2125,6 +2110,18 @@ export default function App() {
                   )}
                 </div>
 
+                <span className="h-4 w-px bg-[#e4e4e7] mx-1" />
+
+                {/* Admin-only "Start Fresh" action — deliberately placed at the
+                    far end of the toolbar, away from Sign Out, so it can't be
+                    clicked by mistake while reaching for that button. */}
+                <button
+                  onClick={handleClearAllQuestions}
+                  title="Clear current workspace items (admin only)"
+                  className="p-2 text-zinc-500 hover:text-rose-600 border border-[#e4e4e7] hover:bg-rose-50 rounded-lg transition-all cursor-pointer bg-[#fafafa]"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </>
             )}
           </div>

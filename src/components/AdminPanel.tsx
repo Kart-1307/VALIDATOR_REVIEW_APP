@@ -400,10 +400,24 @@ export default function AdminPanel({
       return match ? parseInt(match[1], 10) : 0;
     };
 
-    // Group logs by questionId for overall day stats
+    // Group logs by questionId for overall day stats. Bulk approve/reject
+    // actions log a single summary entry with no questionId (see
+    // executeBulkConfirm), so they'd otherwise be silently dropped from every
+    // count below — instead, tally the items they cover directly from the
+    // log's own action + parsed count, keyed by the same action the bulk
+    // action recorded.
     const dayLogsByQuestion = new Map<string, AuditLogEntry[]>();
+    let bulkApprovedOverall = 0;
+    let bulkRejectedOverall = 0;
     dayLogs.forEach(l => {
-      if (!l.questionId) return;
+      if (!l.questionId) {
+        const bCount = parseBulkCount(l.description);
+        if (bCount > 0) {
+          if (l.action === 'approve') bulkApprovedOverall += bCount;
+          else if (l.action === 'reject') bulkRejectedOverall += bCount;
+        }
+        return;
+      }
       if (!dayLogsByQuestion.has(l.questionId)) {
         dayLogsByQuestion.set(l.questionId, []);
       }
@@ -421,27 +435,36 @@ export default function AdminPanel({
       else if (decision === 'needs_revision') overallNeedsRevision++;
     });
 
+    overallApproved += bulkApprovedOverall;
+    overallRejected += bulkRejectedOverall;
+
     const claimed = dayLogs.filter(l => isClaimLog(l.description)).length;
     const comments = dayLogs.filter(l => isCommentLog(l.description)).length;
     const newQuestions = questions.filter(q => q.createdAt && toLocalDateKey(q.createdAt) === snapshotDate).length;
 
     // Per-validator breakdown: combine log evidence + direct question state (questions & batch2) + bulk counts
-    const perValidatorLogs: Record<string, { total: number; questionLogs: Map<string, AuditLogEntry[]>; bulkItems: number }> = {};
+    const perValidatorLogs: Record<string, { total: number; questionLogs: Map<string, AuditLogEntry[]>; bulkApproved: number; bulkRejected: number }> = {};
     dayLogs.forEach(l => {
       const key = getCanonicalUserName(l);
       if (!perValidatorLogs[key]) {
-        perValidatorLogs[key] = { total: 0, questionLogs: new Map(), bulkItems: 0 };
+        perValidatorLogs[key] = { total: 0, questionLogs: new Map(), bulkApproved: 0, bulkRejected: 0 };
       }
       perValidatorLogs[key].total += 1;
-      const bCount = parseBulkCount(l.description);
-      if (bCount > 1) {
-        perValidatorLogs[key].bulkItems += bCount;
-      }
       if (l.questionId) {
         if (!perValidatorLogs[key].questionLogs.has(l.questionId)) {
           perValidatorLogs[key].questionLogs.set(l.questionId, []);
         }
         perValidatorLogs[key].questionLogs.get(l.questionId)!.push(l);
+      } else {
+        // Bulk action summary log — attribute its item count to the
+        // validator using the log's own action (approve/reject), the same
+        // way an individual decision would be, instead of a direction-less
+        // bucket that later got shoehorned into whichever count was bigger.
+        const bCount = parseBulkCount(l.description);
+        if (bCount > 0) {
+          if (l.action === 'approve') perValidatorLogs[key].bulkApproved += bCount;
+          else if (l.action === 'reject') perValidatorLogs[key].bulkRejected += bCount;
+        }
       }
     });
 
@@ -461,7 +484,7 @@ export default function AdminPanel({
         const qDate = (q as any).updatedAt || q.createdAt;
         if (isTouchedByVal && qDate && toLocalDateKey(qDate) === snapshotDate) {
           if (!perValidatorLogs[name]) {
-            perValidatorLogs[name] = { total: 0, questionLogs: new Map(), bulkItems: 0 };
+            perValidatorLogs[name] = { total: 0, questionLogs: new Map(), bulkApproved: 0, bulkRejected: 0 };
           }
           if (!perValidatorLogs[name].questionLogs.has(q.id)) {
             perValidatorLogs[name].questionLogs.set(q.id, []);
@@ -479,7 +502,7 @@ export default function AdminPanel({
         const b2Date = b2.updated_at || b2.created_at;
         if (isTouchedByVal && b2Date && toLocalDateKey(b2Date) === snapshotDate) {
           if (!perValidatorLogs[name]) {
-            perValidatorLogs[name] = { total: 0, questionLogs: new Map(), bulkItems: 0 };
+            perValidatorLogs[name] = { total: 0, questionLogs: new Map(), bulkApproved: 0, bulkRejected: 0 };
           }
           if (!perValidatorLogs[name].questionLogs.has(b2.id)) {
             perValidatorLogs[name].questionLogs.set(b2.id, []);
@@ -500,8 +523,11 @@ export default function AdminPanel({
         else if (decision === 'needs_revision') vNeedsRevision++;
       });
 
+      vApproved += data.bulkApproved;
+      vRejected += data.bulkRejected;
+
       const decidedCount = vApproved + vRejected + vNeedsRevision;
-      const uniqueQuestions = decidedCount > 0 ? Math.max(decidedCount, data.bulkItems) : data.questionLogs.size;
+      const uniqueQuestions = decidedCount > 0 ? decidedCount : data.questionLogs.size;
 
       return {
         name,
