@@ -255,6 +255,7 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
+  const [clearConfirmTypedText, setClearConfirmTypedText] = useState('');
   const [selectedEditQuestion, setSelectedEditQuestion] = useState<SATQuestion | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -287,11 +288,10 @@ export default function App() {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
 
   // --- Bulk action safety net ---
-  // Any bulk approve/reject requires this confirmation step before it touches
-  // the DB. Above BULK_TYPE_TO_CONFIRM_THRESHOLD questions, the user must also
-  // type CONFIRM — this is what stops an accidental "Approve All Filtered"
-  // click (e.g. with no filters set) from silently approving everything.
-  const BULK_TYPE_TO_CONFIRM_THRESHOLD = 10;
+  // Any bulk approve/reject requires this confirmation step, and the user
+  // must always type CONFIRM before it touches the DB — this is what stops
+  // an accidental "Approve All Filtered" click (e.g. with no filters set)
+  // from silently approving everything.
   type BulkActionType = 'approve_filtered' | 'reject_filtered' | 'approve_selected' | 'reject_selected';
   const [bulkConfirm, setBulkConfirm] = useState<{
     actionType: BulkActionType;
@@ -1099,6 +1099,7 @@ export default function App() {
       showToast('Only admins can clear the workspace.', 'error');
       return;
     }
+    setClearConfirmTypedText('');
     setIsClearConfirmOpen(true);
   };
 
@@ -2645,8 +2646,11 @@ export default function App() {
       <AnimatePresence>
         {bulkConfirm && (() => {
           const isApprove = bulkConfirm.status === 'approved';
-          const needsTypedConfirm = bulkConfirm.ids.length > BULK_TYPE_TO_CONFIRM_THRESHOLD;
-          const typedConfirmOk = !needsTypedConfirm || bulkConfirmTypedText.trim().toUpperCase() === 'CONFIRM';
+          // Always require typing CONFIRM before a bulk approve/reject goes
+          // through, regardless of batch size — a single accidental click on
+          // "Approve All Filtered" is exactly the kind of mistake this
+          // guards against, not just large batches.
+          const typedConfirmOk = bulkConfirmTypedText.trim().toUpperCase() === 'CONFIRM';
           const actionNoun = isApprove ? 'Approve' : 'Reject';
           const scopeLabel =
             bulkConfirm.actionType === 'approve_filtered' || bulkConfirm.actionType === 'reject_filtered'
@@ -2683,20 +2687,18 @@ export default function App() {
                   </div>
                 </div>
 
-                {needsTypedConfirm && (
-                  <div className="mt-4">
-                    <label className="text-[11px] font-bold text-zinc-500 uppercase tracking-wide">
-                      Type CONFIRM to proceed ({bulkConfirm.ids.length} is a large batch)
-                    </label>
-                    <input
-                      autoFocus
-                      value={bulkConfirmTypedText}
-                      onChange={(e) => setBulkConfirmTypedText(e.target.value)}
-                      placeholder="CONFIRM"
-                      className="mt-1.5 w-full px-3 py-2 text-sm rounded-lg border border-[#e4e4e7] bg-white focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40"
-                    />
-                  </div>
-                )}
+                <div className="mt-4">
+                  <label className="text-[11px] font-bold text-zinc-500 uppercase tracking-wide">
+                    Type CONFIRM to proceed
+                  </label>
+                  <input
+                    autoFocus
+                    value={bulkConfirmTypedText}
+                    onChange={(e) => setBulkConfirmTypedText(e.target.value)}
+                    placeholder="CONFIRM"
+                    className="mt-1.5 w-full px-3 py-2 text-sm rounded-lg border border-[#e4e4e7] bg-white focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40"
+                  />
+                </div>
 
                 <div className="mt-6 flex items-center justify-end gap-3">
                   <button
@@ -2754,6 +2756,19 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="mt-4">
+                <label className="text-[11px] font-bold text-zinc-500 uppercase tracking-wide">
+                  Type WIPE to proceed
+                </label>
+                <input
+                  autoFocus
+                  value={clearConfirmTypedText}
+                  onChange={(e) => setClearConfirmTypedText(e.target.value)}
+                  placeholder="WIPE"
+                  className="mt-1.5 w-full px-3 py-2 text-sm rounded-lg border border-[#e4e4e7] bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/40"
+                />
+              </div>
+
               <div className="mt-6 flex items-center justify-end gap-3">
                 <button
                   type="button"
@@ -2764,6 +2779,7 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  disabled={clearConfirmTypedText.trim().toUpperCase() !== 'WIPE'}
                   onClick={async () => {
                     setIsClearConfirmOpen(false);
                     const ok = await deleteAllQuestions();
@@ -2777,7 +2793,7 @@ export default function App() {
                     // On failure, deleteAllQuestions already showed an error toast and
                     // left both local state and Supabase untouched.
                   }}
-                  className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 border border-rose-600 rounded-xl transition-all cursor-pointer shadow-sm shadow-rose-950/50"
+                  className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 border border-rose-600 rounded-xl transition-all cursor-pointer shadow-sm shadow-rose-950/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-rose-600"
                 >
                   Yes, Wipe Workspace
                 </button>
