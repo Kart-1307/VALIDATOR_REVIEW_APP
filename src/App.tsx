@@ -233,6 +233,25 @@ export default function App() {
   // still in flight per question id so the realtime handler can ignore
   // self-echoes until this client's own writes for that id are done.
   const pendingWritesRef = useRef<Map<string, number>>(new Map());
+
+  // --- Realtime event batching (perf) ---
+  // Supabase Realtime fires one postgres_changes event PER ROW, not per
+  // action. A single "Approve All Filtered" on a few thousand questions was
+  // triggering that many separate setQuestions() calls, each re-scanning the
+  // *entire* questions array (prev.some + prev.map) and each causing a full
+  // re-render — an O(n) cost repeated once per changed row, so the total
+  // cost grows with both the size of the action and the size of the table.
+  // That's what made clicking around feel progressively slower as the
+  // dataset grew over the past few weeks. Buffering events for a short
+  // window and applying them together turns that into a single O(n) pass
+  // (via a Map, not repeated .some()/.map() scans) and a single re-render
+  // per burst, no matter how many rows changed at once.
+  const pendingQuestionEventsRef = useRef<Map<string, { eventType: string; new?: unknown; old?: unknown }>>(new Map());
+  const questionFlushTimerRef = useRef<number | null>(null);
+  const pendingLogEventsRef = useRef<AuditLogEntry[]>([]);
+  const logFlushTimerRef = useRef<number | null>(null);
+  const REALTIME_BATCH_MS = 60;
+
   const [activeTab, setActiveTab] = useState<'curator' | 'newbatch' | 'analytics' | 'audit' | 'admin'>('curator');
 
   const [filters, setFilters] = useState<FilterState>({
@@ -415,41 +434,84 @@ export default function App() {
       }
     })();
 
+    const flushQuestionEvents = () => {
+      questionFlushTimerRef.current = null;
+      const pending = pendingQuestionEventsRef.current;
+      if (pending.size === 0) return;
+      const events = new Map(pending);
+      pending.clear();
+
+      setQuestions(prev => {
+        // O(1) lookups per event instead of prev.some()/prev.map() scans —
+        // the whole array is only walked once here, regardless of how many
+        // events landed in this batch.
+        const byId = new Map(prev.map(q => [q.id, q] as const));
+        const order = prev.map(q => q.id);
+
+        events.forEach((payload, id) => {
+          if (payload.eventType === 'DELETE') {
+            byId.delete(id);
+            return;
+          }
+          const incoming = rowToQuestion(payload.new as QuestionRow);
+          // Ignore echoes of our own still-in-flight writes — local state
+          // for this id is already at least as fresh as this event.
+          if ((pendingWritesRef.current.get(incoming.id) || 0) > 0) return;
+          const existing = byId.get(id);
+          if (!existing) {
+            order.push(id);
+            byId.set(id, incoming);
+            return;
+          }
+          byId.set(id, {
+            ...incoming,
+            // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
+            passage: incoming.passage ?? existing.passage,
+            explanation: incoming.explanation || existing.explanation,
+            stimulus: incoming.stimulus ?? existing.stimulus,
+            question: incoming.question || existing.question,
+            choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : existing.choices,
+          });
+        });
+
+        return order.filter(id => byId.has(id)).map(id => byId.get(id)!);
+      });
+    };
+
+    const scheduleQuestionFlush = () => {
+      if (questionFlushTimerRef.current !== null) return;
+      questionFlushTimerRef.current = window.setTimeout(flushQuestionEvents, REALTIME_BATCH_MS);
+    };
+
     const questionsChannel = supabase
       .channel('questions-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'questions' }, (payload) => {
-        setQuestions(prev => {
-          if (payload.eventType === 'DELETE') {
-            return prev.filter(q => q.id !== (payload.old as any).id);
-          }
-          const incoming = rowToQuestion(payload.new as QuestionRow);
-          // Ignore echoes of our own still-in-flight writes (see
-          // pendingWritesRef above) — local state for this id is already
-          // at least as fresh as this event.
-          if ((pendingWritesRef.current.get(incoming.id) || 0) > 0) return prev;
-          const exists = prev.some(q => q.id === incoming.id);
-          if (!exists) return [...prev, incoming];
-          return prev.map(q => {
-            if (q.id !== incoming.id) return q;
-            return {
-              ...incoming,
-              // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
-              passage: incoming.passage ?? q.passage,
-              explanation: incoming.explanation || q.explanation,
-              stimulus: incoming.stimulus ?? q.stimulus,
-              question: incoming.question || q.question,
-              choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : q.choices,
-            };
-          });
-        });
+        const id = payload.eventType === 'DELETE' ? (payload.old as any).id : (payload.new as any).id;
+        pendingQuestionEventsRef.current.set(id, payload as any);
+        scheduleQuestionFlush();
       })
       .subscribe();
+
+    const flushLogEvents = () => {
+      logFlushTimerRef.current = null;
+      const pending = pendingLogEventsRef.current;
+      if (pending.length === 0) return;
+      const incoming = pending.slice();
+      pendingLogEventsRef.current = [];
+      // Events arrive newest-last in the buffer; the log is kept newest-first.
+      setLogs(prev => [...incoming.reverse(), ...prev]);
+    };
+
+    const scheduleLogFlush = () => {
+      if (logFlushTimerRef.current !== null) return;
+      logFlushTimerRef.current = window.setTimeout(flushLogEvents, REALTIME_BATCH_MS);
+    };
 
     const logsChannel = supabase
       .channel('audit-log-changes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'audit_log' }, (payload) => {
         const r: any = payload.new;
-        setLogs(prev => [{
+        pendingLogEventsRef.current.push({
           id: r.id,
           timestamp: new Date(r.timestamp).toLocaleString(),
           rawTimestamp: r.timestamp,
@@ -458,12 +520,23 @@ export default function App() {
           description: r.description,
           user: r.user_name || undefined,
           userId: r.user_id || undefined
-        }, ...prev]);
+        });
+        scheduleLogFlush();
       })
       .subscribe();
 
     return () => {
       cancelled = true;
+      if (questionFlushTimerRef.current !== null) {
+        window.clearTimeout(questionFlushTimerRef.current);
+        questionFlushTimerRef.current = null;
+      }
+      if (logFlushTimerRef.current !== null) {
+        window.clearTimeout(logFlushTimerRef.current);
+        logFlushTimerRef.current = null;
+      }
+      pendingQuestionEventsRef.current.clear();
+      pendingLogEventsRef.current = [];
       supabase.removeChannel(questionsChannel);
       supabase.removeChannel(logsChannel);
     };
