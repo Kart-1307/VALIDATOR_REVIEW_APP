@@ -15,7 +15,7 @@ import ValidatorProgressModal from './components/ValidatorProgressModal';
 import Login from './components/Login';
 import UpdatePassword from './components/UpdatePassword';
 import { supabase, Profile } from './lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow } from './lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey } from './lib/mappers';
 import { getConsensusResolution } from './lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -1537,7 +1537,10 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute('href', url);
-    downloadAnchor.setAttribute('download', `mysat-production-question-bank-${Date.now()}.json`);
+    // Filename standardized to `production_bank` per repo convention (was
+    // previously `mysat-production-question-bank-<timestamp>`). Schema is
+    // unchanged.
+    downloadAnchor.setAttribute('download', `production_bank-${toLocalDateKey(new Date().toISOString())}-${Date.now()}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     setTimeout(() => {
@@ -1547,6 +1550,65 @@ export default function App() {
 
     showToast(`Exported ${productionRecords.length} validated question(s) in production bank format.`, 'success');
     logEvent('note', `Exported ${productionRecords.length} question(s) to the production question bank format`);
+  };
+
+  // --- Datewise "approved questions" export for daily student-app hand-off ---
+  // Separate from both Export Production Bank (full MySAT AI Coach schema)
+  // and the bucketed "raw" exports (full internal record w/ checklist,
+  // comments, consensus, claim info). This one is intentionally minimal —
+  // matches the exact raw batch-item schema the student app's ingestion
+  // expects: id, Section, category, question, passage, choices,
+  // correct_answer, explanation, difficulty. Nothing else.
+  //
+  // "Datewise" = only questions approved (last touched) on the selected
+  // calendar day, so this can be re-run every day and each day's file is
+  // just that day's newly-approved batch, not the whole accumulated bank.
+  const [dailyExportDate, setDailyExportDate] = useState<string>(() => toLocalDateKey(new Date().toISOString()) || '');
+
+  const downloadDailyApprovedBatch = (dateKey: string) => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    if (!dateKey) {
+      showToast('Pick a date to export.', 'error');
+      return;
+    }
+    const approvedOnDate = questions.filter(
+      q => q.reviewStatus === 'approved' && toLocalDateKey(q.updatedAt || q.createdAt) === dateKey
+    );
+    if (approvedOnDate.length === 0) {
+      showToast(`No questions were approved on ${dateKey} yet.`, 'error');
+      return;
+    }
+
+    const dailyRecords = approvedOnDate.map(q => ({
+      id: q.id,
+      Section: q.Section || q.section || null,
+      category: q.category,
+      question: q.question,
+      passage: q.passage,
+      choices: q.choices,
+      correct_answer: q.correct_answer,
+      explanation: q.explanation,
+      difficulty: q.difficulty
+    }));
+
+    const blob = new Blob([JSON.stringify(dailyRecords, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', url);
+    downloadAnchor.setAttribute('download', `approved-questions-${dateKey}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    setTimeout(() => {
+      document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+    }, 100);
+
+    showToast(`Exported ${dailyRecords.length} question(s) approved on ${dateKey} for student app integration.`, 'success');
+    logEvent('note', `Exported ${dailyRecords.length} approved question(s) for ${dateKey} (daily student app batch)`);
+    setIsExportMenuOpen(false);
   };
 
   // --- Bucketed exports (Approved / Rejected / Needs Revision / Total Test
@@ -2068,6 +2130,35 @@ export default function App() {
 
                   {isExportMenuOpen && (
                     <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
+                      {/* Datewise approved export — the daily hand-off file
+                          for student app integration. Minimal schema (id,
+                          Section, category, question, passage, choices,
+                          correct_answer, explanation, difficulty) — not the
+                          production bank schema and not the raw/internal one. */}
+                      <div className="px-3.5 py-2.5 bg-indigo-50/60 border-b border-[#e4e4e7]">
+                        <p className="text-xs font-bold text-zinc-900">Daily Approved Batch (Student App)</p>
+                        <p className="text-[11px] text-zinc-500 mb-2">Only questions approved on the selected date</p>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="date"
+                            value={dailyExportDate}
+                            onChange={(e) => setDailyExportDate(e.target.value)}
+                            className="flex-1 min-w-0 px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                          />
+                          <button
+                            onClick={() => downloadDailyApprovedBatch(dailyExportDate)}
+                            disabled={!dailyExportDate}
+                            title="Download the selected date's approved questions in the student app schema"
+                            className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer shrink-0 ${!dailyExportDate
+                                ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                                : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                              }`}
+                          >
+                            <FileText className="w-3 h-3" /> JSON
+                          </button>
+                        </div>
+                      </div>
+
                       {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
                         const count = questionsInBucket(bucket).length;
                         const isEmpty = count === 0;

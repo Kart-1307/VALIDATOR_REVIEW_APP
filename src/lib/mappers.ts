@@ -42,6 +42,19 @@ export interface QuestionRow {
   updated_at: string;
 }
 
+// Local (browser timezone) yyyy-mm-dd for a timestamp. Used to bucket a
+// question's last-modified time into a calendar day for the datewise
+// approved-questions export (see App.tsx: downloadDailyApprovedBatch).
+export function toLocalDateKey(isoTimestamp: string | null | undefined): string | null {
+  if (!isoTimestamp) return null;
+  const d = new Date(isoTimestamp);
+  if (Number.isNaN(d.getTime())) return null;
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export function rowToQuestion(row: QuestionRow): SATQuestion {
   return {
     id: row.id,
@@ -61,6 +74,12 @@ export function rowToQuestion(row: QuestionRow): SATQuestion {
     difficulty: row.difficulty as SATQuestion['difficulty'],
     reviewStatus: row.review_status as SATQuestion['reviewStatus'],
     createdAt: row.created_at,
+    // Not written back on upsert (questionToRow deliberately omits it — the
+    // `questions_set_updated_at` trigger in schema.sql owns this column).
+    // Used as the best-effort "when was this last touched" signal for the
+    // datewise approved-questions export, since there is no dedicated
+    // approved_at column.
+    updatedAt: row.updated_at,
     validatorStatus: row.validator_status || undefined,
     validatorFeedback: row.validator_feedback || undefined,
     similarity_score: row.similarity_score ?? undefined,
