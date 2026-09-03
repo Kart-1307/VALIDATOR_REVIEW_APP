@@ -55,6 +55,25 @@ export function toLocalDateKey(isoTimestamp: string | null | undefined): string 
   return `${year}-${month}-${day}`;
 }
 
+// Folds passage/stimulus into the question text so the "question" field in
+// the datewise approved-questions export (student app schema) is fully
+// self-contained on its own — matches the original raw batch format, where
+// a question with a passage/stimulus already had it inlined into the
+// question text (see the reference schema screenshot: passage was null
+// there because it had already been merged in upstream). Order: passage,
+// then stimulus, then the actual question/prompt, separated by blank lines.
+// Only ever used for that one export — every other export keeps
+// question/passage/stimulus as separate fields, unchanged.
+export function buildFullQuestionText(q: {
+  passage?: string | null;
+  stimulus?: string | null;
+  question: string;
+}): string {
+  return [q.passage, q.stimulus, q.question]
+    .filter((part): part is string => !!part && part.trim().length > 0)
+    .join('\n\n');
+}
+
 export function rowToQuestion(row: QuestionRow): SATQuestion {
   return {
     id: row.id,

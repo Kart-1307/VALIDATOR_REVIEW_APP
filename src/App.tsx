@@ -15,7 +15,7 @@ import ValidatorProgressModal from './components/ValidatorProgressModal';
 import Login from './components/Login';
 import UpdatePassword from './components/UpdatePassword';
 import { supabase, Profile } from './lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey } from './lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildFullQuestionText } from './lib/mappers';
 import { getConsensusResolution } from './lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -1580,7 +1580,11 @@ export default function App() {
   // claim info — see downloadRawExport below). This one is intentionally
   // minimal — matches the exact schema the student app's ingestion expects:
   // id, Section, category, question, passage, choices, correct_answer,
-  // explanation, difficulty. Nothing else.
+  // explanation, difficulty. Nothing else. The `question` field folds in
+  // passage/stimulus (see buildFullQuestionText in lib/mappers.ts) so it
+  // reads as one complete, self-contained question on its own — `passage`
+  // is still included separately too, for anything downstream that wants
+  // it split out.
   //
   // Accepts a from/to date range (inclusive) instead of a single day, so a
   // multi-day backlog can be pulled in one file, or a single day by setting
@@ -1609,7 +1613,7 @@ export default function App() {
       id: q.id,
       Section: q.Section || q.section || null,
       category: q.category,
-      question: q.question,
+      question: buildFullQuestionText(q),
       passage: q.passage,
       choices: q.choices,
       correct_answer: q.correct_answer,
