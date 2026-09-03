@@ -44,7 +44,7 @@ export interface QuestionRow {
 
 // Local (browser timezone) yyyy-mm-dd for a timestamp. Used to bucket a
 // question's last-modified time into a calendar day for the datewise
-// approved-questions export (see App.tsx: downloadDailyApprovedBatch).
+// approved-questions export (see App.tsx: downloadApprovedRangeBatch).
 export function toLocalDateKey(isoTimestamp: string | null | undefined): string | null {
   if (!isoTimestamp) return null;
   const d = new Date(isoTimestamp);

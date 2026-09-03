@@ -143,6 +143,26 @@ export default function NewBatchWorkspace({
     return () => document.removeEventListener('mousedown', handler);
   }, [isExportMenuOpen]);
 
+  // --- Standalone date-range popover for "Export Approved (Date Range)" —
+  // its own control, not nested inside the "More Exports" dropdown above,
+  // so it can't be mistaken for "Total New Batch Pool" (all statuses, full
+  // raw schema). Mirrors the same control on the Curator tab exactly.
+  const [isRangeExportOpen, setIsRangeExportOpen] = useState(false);
+  const rangeExportMenuRef = useRef<HTMLDivElement>(null);
+  const todayKey = toLocalDateKey(new Date().toISOString()) || '';
+  const [exportRangeFrom, setExportRangeFrom] = useState<string>(todayKey);
+  const [exportRangeTo, setExportRangeTo] = useState<string>(todayKey);
+  useEffect(() => {
+    if (!isRangeExportOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (rangeExportMenuRef.current && !rangeExportMenuRef.current.contains(e.target as Node)) {
+        setIsRangeExportOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [isRangeExportOpen]);
+
   // --- Merge into Curator (admin-only) ---
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
   const [mergeScope, setMergeScope] = useState<'approved' | 'selected' | 'all'>('approved');
@@ -1187,33 +1207,68 @@ export default function NewBatchWorkspace({
     setIsExportMenuOpen(false);
   };
 
-  // --- Datewise "approved questions" export for daily student-app hand-off,
-  // scoped to this New Batch pool (questions_batch2). Mirrors the same
-  // feature on the main Curator tab (see App.tsx: downloadDailyApprovedBatch)
-  // — same minimal schema, same "updated_at as approved-on-day proxy"
-  // caveat (no dedicated approved_at column here either), kept as its own
-  // separate function since this workspace's `questions` state is isolated
-  // from the Curator tab's and must never be mixed into one export. ---
-  const [dailyExportDate, setDailyExportDate] = useState<string>(() => toLocalDateKey(new Date().toISOString()) || '');
-
-  const downloadDailyApprovedBatch = (dateKey: string) => {
+  // --- Standalone "Export Raw" button — full internal record for every
+  // question in this New Batch pool, regardless of status. Mirrors the
+  // Curator tab's equivalent button exactly (same buildExportRecord shape),
+  // so "raw" means the same thing in both places. One click, no dropdown.
+  const downloadRawExport = () => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    if (!dateKey) {
-      showToast('Pick a date to export.', 'error');
+    if (questions.length === 0) {
+      showToast('No questions to export.', 'error');
       return;
     }
-    const approvedOnDate = questions.filter(
-      q => q.reviewStatus === 'approved' && toLocalDateKey(q.updatedAt || q.createdAt) === dateKey
-    );
-    if (approvedOnDate.length === 0) {
-      showToast(`No New Batch questions were approved on ${dateKey} yet.`, 'error');
+    const records = questions.map(buildExportRecord);
+    const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', url);
+    downloadAnchor.setAttribute('download', `new-batch-raw-export-${Date.now()}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    setTimeout(() => {
+      document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+    }, 100);
+
+    showToast(`Exported ${records.length} question(s) — Raw (full detail).`, 'success');
+    logEvent('note', `Exported ${records.length} question(s) — Raw (full detail)`);
+  };
+
+  // --- Datewise "approved questions" export for daily student-app hand-off,
+  // scoped to this New Batch pool (questions_batch2). Mirrors the same
+  // feature on the main Curator tab (see App.tsx: downloadApprovedRangeBatch)
+  // — same minimal schema, same "updated_at as approved-on-day proxy"
+  // caveat (no dedicated approved_at column here either), kept as its own
+  // separate function since this workspace's `questions` state is isolated
+  // from the Curator tab's and must never be mixed into one export.
+  //
+  // Accepts a from/to date range (inclusive) instead of a single day, so a
+  // multi-day backlog can be pulled in one file, or a single day by setting
+  // from === to.
+  const downloadApprovedRangeBatch = (fromKey: string, toKey: string) => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    if (!fromKey || !toKey) {
+      showToast('Pick both a from and to date to export.', 'error');
+      return;
+    }
+    const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
+    const approvedInRange = questions.filter(q => {
+      if (q.reviewStatus !== 'approved') return false;
+      const dateKey = toLocalDateKey(q.updatedAt || q.createdAt);
+      return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
+    });
+    if (approvedInRange.length === 0) {
+      showToast(`No New Batch questions were approved between ${rangeStart} and ${rangeEnd}.`, 'error');
       return;
     }
 
-    const dailyRecords = approvedOnDate.map(q => ({
+    const records = approvedInRange.map(q => ({
       id: q.id,
       Section: q.Section || q.section || null,
       category: q.category,
@@ -1225,11 +1280,12 @@ export default function NewBatchWorkspace({
       difficulty: q.difficulty
     }));
 
-    const blob = new Blob([JSON.stringify(dailyRecords, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute('href', url);
-    downloadAnchor.setAttribute('download', `new-batch-approved-questions-${dateKey}.json`);
+    const rangeLabel = rangeStart === rangeEnd ? rangeStart : `${rangeStart}_to_${rangeEnd}`;
+    downloadAnchor.setAttribute('download', `new-batch-approved-questions-${rangeLabel}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     setTimeout(() => {
@@ -1237,9 +1293,9 @@ export default function NewBatchWorkspace({
       URL.revokeObjectURL(url);
     }, 100);
 
-    showToast(`Exported ${dailyRecords.length} question(s) approved on ${dateKey} for student app integration.`, 'success');
-    logEvent('note', `Exported ${dailyRecords.length} approved question(s) for ${dateKey} (daily student app batch)`);
-    setIsExportMenuOpen(false);
+    showToast(`Exported ${records.length} question(s) approved between ${rangeStart} and ${rangeEnd}.`, 'success');
+    logEvent('note', `Exported ${records.length} approved question(s) for ${rangeStart} to ${rangeEnd} (student app batch)`);
+    setIsRangeExportOpen(false);
   };
 
   // Comments/consensus reviews are arrays on the question, but a spreadsheet
@@ -1393,57 +1449,99 @@ export default function NewBatchWorkspace({
                 <GitMerge className="w-3.5 h-3.5" /> Merge into Curator
               </button>
 
+              {/* Standalone raw export — full internal record for every
+                  question in this New Batch pool. One click, no dropdown. */}
+              <button
+                onClick={downloadRawExport}
+                disabled={questions.length === 0}
+                title="Export every New Batch question with the full internal/validator-detail schema"
+                className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${questions.length === 0
+                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                    : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
+                  }`}
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export Raw
+              </button>
+
+              {/* Standalone date-range popover — the new-schema export for
+                  student app hand-off, scoped to this New Batch pool. Its
+                  own button/popover so it's never confused with "Export
+                  Raw" or the bucketed dropdown below. Schema: id, Section,
+                  category, question, passage, choices, correct_answer,
+                  explanation, difficulty. */}
+              <div className="relative" ref={rangeExportMenuRef}>
+                <button
+                  onClick={() => setIsRangeExportOpen(open => !open)}
+                  title="Export approved New Batch questions (student app schema) for a date range"
+                  className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Export Approved (Date Range)
+                </button>
+
+                {isRangeExportOpen && (
+                  <div className="absolute right-0 mt-1.5 w-72 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5">
+                    <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
+                    <p className="text-[11px] text-zinc-500 mb-2">Only New Batch questions approved within the selected range</p>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-[11px] font-semibold text-zinc-600">
+                        From
+                        <input
+                          type="date"
+                          value={exportRangeFrom}
+                          onChange={(e) => setExportRangeFrom(e.target.value)}
+                          className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                        />
+                      </label>
+                      <label className="text-[11px] font-semibold text-zinc-600">
+                        To
+                        <input
+                          type="date"
+                          value={exportRangeTo}
+                          onChange={(e) => setExportRangeTo(e.target.value)}
+                          className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                        />
+                      </label>
+                      <button
+                        onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
+                        disabled={!exportRangeFrom || !exportRangeTo}
+                        title="Download the selected range's approved New Batch questions in the student app schema"
+                        className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${!exportRangeFrom || !exportRangeTo
+                            ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                            : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                          }`}
+                      >
+                        <FileText className="w-3 h-3" /> Download JSON
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Bucketed export dropdown: Approved / Rejected / Needs
                   Revision / Total New Batch Pool, each as JSON or Excel —
                   mirrors the main Curator tab's export dropdown, scoped to
-                  this workspace's own questions_batch2 pool. */}
+                  this workspace's own questions_batch2 pool. Renamed to
+                  "More Exports" now that Raw / Date-Range each have their
+                  own dedicated button above. */}
               <div className="relative" ref={exportMenuRef}>
                 <button
                   onClick={() => setIsExportMenuOpen(open => !open)}
                   disabled={questions.length === 0}
-                  title="Export questions from this New Batch pool"
+                  title="More export options for this New Batch pool"
                   className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${questions.length === 0
                       ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
                       : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-700 shadow-xs'
                     }`}
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Export
+                  More Exports
                   <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
                 </button>
 
                 {isExportMenuOpen && (
                   <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
-                    {/* Datewise approved export — daily hand-off file for
-                        student app integration, scoped to this New Batch
-                        pool. Minimal schema (id, Section, category,
-                        question, passage, choices, correct_answer,
-                        explanation, difficulty), same as the Curator tab's
-                        equivalent. */}
-                    <div className="px-3.5 py-2.5 bg-indigo-50/60 border-b border-[#e4e4e7]">
-                      <p className="text-xs font-bold text-zinc-900">Daily Approved Batch (Student App)</p>
-                      <p className="text-[11px] text-zinc-500 mb-2">Only New Batch questions approved on the selected date</p>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="date"
-                          value={dailyExportDate}
-                          onChange={(e) => setDailyExportDate(e.target.value)}
-                          className="flex-1 min-w-0 px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                        />
-                        <button
-                          onClick={() => downloadDailyApprovedBatch(dailyExportDate)}
-                          disabled={!dailyExportDate}
-                          title="Download the selected date's approved New Batch questions in the student app schema"
-                          className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer shrink-0 ${!dailyExportDate
-                              ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                              : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
-                            }`}
-                        >
-                          <FileText className="w-3 h-3" /> JSON
-                        </button>
-                      </div>
-                    </div>
-
                     {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
                       const count = questionsInBucket(bucket).length;
                       const isEmpty = count === 0;
