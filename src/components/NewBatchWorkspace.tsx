@@ -8,7 +8,7 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildFullQuestionText } from '../lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -1268,17 +1268,7 @@ export default function NewBatchWorkspace({
       return;
     }
 
-    const records = approvedInRange.map(q => ({
-      id: q.id,
-      Section: q.Section || q.section || null,
-      category: q.category,
-      question: buildFullQuestionText(q),
-      passage: q.passage,
-      choices: q.choices,
-      correct_answer: q.correct_answer,
-      explanation: q.explanation,
-      difficulty: q.difficulty
-    }));
+    const records = approvedInRange.map(buildProductionExportRecord);
 
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);

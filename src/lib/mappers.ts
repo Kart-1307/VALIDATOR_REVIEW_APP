@@ -55,23 +55,67 @@ export function toLocalDateKey(isoTimestamp: string | null | undefined): string 
   return `${year}-${month}-${day}`;
 }
 
-// Folds passage/stimulus into the question text so the "question" field in
-// the datewise approved-questions export (student app schema) is fully
-// self-contained on its own — matches the original raw batch format, where
-// a question with a passage/stimulus already had it inlined into the
-// question text (see the reference schema screenshot: passage was null
-// there because it had already been merged in upstream). Order: passage,
-// then stimulus, then the actual question/prompt, separated by blank lines.
-// Only ever used for that one export — every other export keeps
-// question/passage/stimulus as separate fields, unchanged.
-export function buildFullQuestionText(q: {
+// Clean text for production JSON exports. Keep meaningful SAT content intact while
+// removing BOM/zero-width characters and normalizing line endings/Unicode form so
+// exported files do not contain hidden encoding artifacts. JSON.stringify emits
+// normal Unicode characters directly (it does not turn them into \uXXXX escapes).
+function cleanExportText(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+
+  const cleaned = value
+    .normalize('NFC')
+    .replace(/\uFEFF/g, '')
+    .replace(/[\u200B-\u200D\u2060]/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
+
+  return cleaned || null;
+}
+
+// Production/student-app schema keeps the actual question prompt in `question`
+// and puts any supporting passage/stimulus in `passage`. Stimulus is intentionally
+// not exported as a separate field. This also handles future generated questions
+// where stimulus is absent, passage is absent, or both are absent.
+export function buildProductionPassage(q: {
   passage?: string | null;
   stimulus?: string | null;
+}): string | null {
+  const parts = [cleanExportText(q.passage), cleanExportText(q.stimulus)]
+    .filter((part): part is string => !!part);
+
+  // Avoid repeating identical passage/stimulus content.
+  const uniqueParts = parts.filter((part, index) => parts.indexOf(part) === index);
+  return uniqueParts.length ? uniqueParts.join('\n\n') : null;
+}
+
+// Exact production date-range export shape shared by Curator and New Batch.
+// `question` is never rebuilt with passage/stimulus, preventing the passage from
+// appearing twice.
+export function buildProductionExportRecord(q: {
+  id: string;
+  Section?: string | null;
+  section?: string | null;
+  category: string;
   question: string;
-}): string {
-  return [q.passage, q.stimulus, q.question]
-    .filter((part): part is string => !!part && part.trim().length > 0)
-    .join('\n\n');
+  passage?: string | null;
+  stimulus?: string | null;
+  choices: { A: string; B: string; C: string; D: string };
+  correct_answer: string;
+  explanation: string;
+  difficulty: string;
+}) {
+  return {
+    id: q.id,
+    Section: q.Section || q.section || null,
+    category: q.category,
+    question: cleanExportText(q.question) || '',
+    passage: buildProductionPassage(q),
+    choices: q.choices,
+    correct_answer: q.correct_answer,
+    explanation: cleanExportText(q.explanation) || '',
+    difficulty: q.difficulty
+  };
 }
 
 export function rowToQuestion(row: QuestionRow): SATQuestion {
