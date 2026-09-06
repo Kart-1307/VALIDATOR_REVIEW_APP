@@ -8,7 +8,7 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord } from '../lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -356,7 +356,7 @@ export default function NewBatchWorkspace({
 
   const deleteAllQuestions = async () => {
     if (questions.length > 0) {
-      const exportList = questions.map(buildExportRecord);
+      const exportList = questions.map(buildRawExportRecord);
       const blob = new Blob([JSON.stringify(exportList, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const downloadAnchor = document.createElement('a');
@@ -1133,51 +1133,6 @@ export default function NewBatchWorkspace({
   const questionsInBucket = (bucket: ExportBucket) =>
     bucket === 'all' ? questions : questions.filter(q => (q.reviewStatus || 'pending') === bucket);
 
-  // Same record shape as the main Curator tab's export, so downstream
-  // consumers (e.g. the pipeline that ingests these files) don't need a
-  // separate parser just because the batch happened to come through the
-  // isolated New Batch tab.
-  const buildExportRecord = (q: SATQuestion) => ({
-    id: q.id,
-    section: q.Section || q.section || null,
-    category: q.category,
-    subSkill: q.subSkill || null,
-    questionType: q.questionType || 'mcq',
-    difficulty: q.difficulty,
-    passage: q.passage,
-    stimulus: q.stimulus || null,
-    imageUrl: q.imageUrl || null,
-    question: q.question,
-    choices: q.choices,
-    correct_answer: q.correct_answer,
-    explanation: q.explanation,
-    reviewStatus: q.reviewStatus || 'pending',
-    reviewedBy: q.claimedByName || q.assignedToName || null,
-    claimedBy: q.claimedByName || null,
-    claimedAt: q.claimedAt || null,
-    assignedTo: q.assignedToName || null,
-    checklist: {
-      formationOk: q.formationOk ?? null,
-      answerOk: q.answerOk ?? null,
-      categoryOk: q.categoryOk ?? null,
-      categoryOverride: q.categoryOverride || null,
-      difficultyOk: q.difficultyOk ?? null,
-      difficultyOverride: q.difficultyOverride || null
-    },
-    statusOverride: q.statusOverride || null,
-    statusOverrideJustification: q.statusOverrideJustification || null,
-    reviewerNote: q.reviewerNote || null,
-    comments: q.comments || [],
-    consensusReviews: q.consensusReviews || [],
-    requiresSecondReview: q.requiresSecondReview || false,
-    pipelineValidatorStatus: q.validatorStatus || null,
-    pipelineValidatorFeedback: q.validatorFeedback || null,
-    similarityScore: typeof q.similarity_score === 'number' ? q.similarity_score : null,
-    similarQuestionId: q.similar_question_id || null,
-    generatorRunId: q.generatorRunId || null,
-    createdAt: q.createdAt || null
-  });
-
   const exportBucketAsJson = (bucket: ExportBucket) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
@@ -1188,7 +1143,7 @@ export default function NewBatchWorkspace({
       showToast(`No ${EXPORT_BUCKET_LABELS[bucket].toLowerCase()} to export.`, 'error');
       return;
     }
-    const records = list.map(buildExportRecord);
+    const records = list.map(buildRawExportRecord);
 
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1209,8 +1164,9 @@ export default function NewBatchWorkspace({
 
   // --- Standalone "Export Raw" button — full internal record for every
   // question in this New Batch pool, regardless of status. Mirrors the
-  // Curator tab's equivalent button exactly (same buildExportRecord shape),
-  // so "raw" means the same thing in both places. One click, no dropdown.
+  // Curator tab's equivalent button exactly (same buildRawExportRecord
+  // shape), so "raw" means the same thing in both places. One click, no
+  // dropdown.
   const downloadRawExport = () => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
@@ -1220,7 +1176,7 @@ export default function NewBatchWorkspace({
       showToast('No questions to export.', 'error');
       return;
     }
-    const records = questions.map(buildExportRecord);
+    const records = questions.map(buildRawExportRecord);
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
@@ -1235,6 +1191,41 @@ export default function NewBatchWorkspace({
 
     showToast(`Exported ${records.length} question(s) — Raw (full detail).`, 'success');
     logEvent('note', `Exported ${records.length} question(s) — Raw (full detail)`);
+  };
+
+  // --- Production question bank export for this New Batch pool. Produces the
+  // exact same `production_bank` format as the main Curator tab (the MySAT AI
+  // Coach production schema, README §1) — shared builder, so both workspaces
+  // emit byte-identical records. Each approved question becomes ONE complete
+  // record (passage/stimulus embedded as fields, never separate rows).
+  const downloadProductionBank = () => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    const approved = questions.filter(q => q.reviewStatus === 'approved');
+    if (approved.length === 0) {
+      showToast('No approved questions yet — approve some before exporting the production bank.', 'error');
+      return;
+    }
+
+    const productionRecords = approved.map(buildProductionBankRecord);
+
+    const blob = new Blob([JSON.stringify(productionRecords, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', url);
+    // Filename follows the `production_bank` convention used by the Curator tab.
+    downloadAnchor.setAttribute('download', `production_bank-${toLocalDateKey(new Date().toISOString())}-${Date.now()}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    setTimeout(() => {
+      document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+    }, 100);
+
+    showToast(`Exported ${productionRecords.length} validated question(s) in production bank format.`, 'success');
+    logEvent('note', `Exported ${productionRecords.length} question(s) to the production question bank format`);
   };
 
   // --- Datewise "approved questions" export for daily student-app hand-off,
@@ -1258,11 +1249,7 @@ export default function NewBatchWorkspace({
       return;
     }
     const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
-    const approvedInRange = questions.filter(q => {
-      if (q.reviewStatus !== 'approved') return false;
-      const dateKey = toLocalDateKey(q.updatedAt || q.createdAt);
-      return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
-    });
+    const approvedInRange = questions.filter(q => isApprovedInDateRange(q, fromKey, toKey));
     if (approvedInRange.length === 0) {
       showToast(`No New Batch questions were approved between ${rangeStart} and ${rangeEnd}.`, 'error');
       return;
@@ -1437,6 +1424,22 @@ export default function NewBatchWorkspace({
                 className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${questions.length === 0 ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed' : 'bg-[#6366f1] hover:bg-indigo-700 text-white border-[#6366f1] shadow-xs'}`}
               >
                 <GitMerge className="w-3.5 h-3.5" /> Merge into Curator
+              </button>
+
+              {/* Distinct production question bank export — MySAT AI Coach
+                  production schema (same `production_bank` format as the
+                  Curator tab). One complete record per approved question. */}
+              <button
+                onClick={downloadProductionBank}
+                disabled={stats.approved === 0}
+                title="Export approved New Batch questions in the production data model MySAT AI Coach consumes"
+                className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${stats.approved === 0
+                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                    : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-700 shadow-xs'
+                  }`}
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export Production Bank
               </button>
 
               {/* Standalone raw export — full internal record for every

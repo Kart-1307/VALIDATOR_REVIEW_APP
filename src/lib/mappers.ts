@@ -55,6 +55,30 @@ export function toLocalDateKey(isoTimestamp: string | null | undefined): string 
   return `${year}-${month}-${day}`;
 }
 
+// Shared approval-date filter used by BOTH the main Curator tab
+// (App.tsx: downloadApprovedRangeBatch) and the New Batch workspace
+// (NewBatchWorkspace.tsx: downloadApprovedRangeBatch), so brushing up a
+// timezone/edge-case fix here propagates to both exports.
+//
+// NOTE (repository limitation): there is no dedicated `approved_at` column in
+// the schema, so `updated_at` is used as the best-effort "when was this
+// approved" proxy (the `questions_set_updated_at` trigger bumps it whenever a
+// question row changes, which includes the approve action). `fromKey`/`toKey`
+// are inclusive yyyy-mm-dd local-date keys. A question approved around
+// midnight is bucketed by the browser's local timezone via toLocalDateKey,
+// i.e. the same tz the app itself runs in.
+export function isApprovedInDateRange(
+  q: { reviewStatus?: string | null; updatedAt?: string | null; createdAt?: string | null },
+  fromKey: string,
+  toKey: string
+): boolean {
+  if (!q || q.reviewStatus !== 'approved') return false;
+  if (!fromKey || !toKey) return false;
+  const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
+  const dateKey = toLocalDateKey(q.updatedAt || q.createdAt);
+  return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
+}
+
 // Clean text for production JSON exports. Keep meaningful SAT content intact while
 // removing BOM/zero-width characters and normalizing line endings/Unicode form so
 // exported files do not contain hidden encoding artifacts. JSON.stringify emits
@@ -89,22 +113,88 @@ export function buildProductionPassage(q: {
   return uniqueParts.length ? uniqueParts.join('\n\n') : null;
 }
 
-// Exact production date-range export shape shared by Curator and New Batch.
-// `question` is never rebuilt with passage/stimulus, preventing the passage from
-// appearing twice.
-export function buildProductionExportRecord(q: {
-  id: string;
-  Section?: string | null;
-  section?: string | null;
-  category: string;
-  question: string;
-  passage?: string | null;
-  stimulus?: string | null;
-  choices: { A: string; B: string; C: string; D: string };
-  correct_answer: string;
-  explanation: string;
-  difficulty: string;
-}) {
+// --- Production question bank export (README §1 "Vetted Production Test
+// Bank", spec §10/§12/§13). This is the schema the MySAT AI Coach production
+// engine consumes and the repo's source of truth for the `production_bank`
+// export — it used to be inlined in App.tsx's downloadProductionBank and is
+// now shared so the New Batch workspace can produce the identical format.
+// Each approved question becomes ONE complete record; any supporting
+// passage/stimulus live as fields on that same record (never separate rows).
+export function buildProductionBankRecord(q: SATQuestion) {
+  return {
+    id: q.id,
+    stem: q.question,
+    question_type: q.questionType || 'mcq',
+    choices: q.choices,
+    correct_answer: q.correct_answer,
+    explanation: q.explanation,
+    category: q.category,
+    sub_skill: q.subSkill || null,
+    difficulty: q.difficulty,
+    passage: q.passage || null,
+    stimulus: q.stimulus || null,
+    image_url: q.imageUrl || null,
+    generator_run_id: q.generatorRunId || null,
+    status: 'validated',
+    validated_at: new Date().toISOString(),
+    created_at: q.createdAt || null
+  };
+}
+
+// --- Raw export ("new batch schema"). Reflects the exact column set of the
+// questions_batch2 table (a structural clone of public.questions, see
+// migration_new_batch_workspace.sql §1) — the shared source of truth for the
+// full internal record. Every question is exported as ONE complete object:
+// the question content, answer/options, metadata, validator details and
+// validation results, stimulus (embedded as a field, not a separate record),
+// IDs and references. batch_label / batch_uploaded_at are New-Batch-only
+// columns and fall back to null for main-`questions` rows.
+export function buildRawExportRecord(q: SATQuestion) {
+  return {
+    id: q.id,
+    category: q.category,
+    sub_skill: q.subSkill ?? null,
+    question_type: q.questionType || 'mcq',
+    image_url: q.imageUrl ?? null,
+    passage: q.passage ?? null,
+    stimulus: q.stimulus ?? null,
+    question: q.question,
+    choices: q.choices ?? null,
+    correct_answer: q.correct_answer,
+    explanation: q.explanation,
+    module: q.module ?? null,
+    section: q.Section || q.section || null,
+    difficulty: q.difficulty,
+    generator_run_id: q.generatorRunId ?? null,
+    review_status: q.reviewStatus || 'pending',
+    validator_status: q.validatorStatus ?? null,
+    validator_feedback: q.validatorFeedback ?? null,
+    similarity_score: typeof q.similarity_score === 'number' ? q.similarity_score : null,
+    similar_question_id: q.similar_question_id ?? null,
+    formation_ok: q.formationOk ?? null,
+    answer_ok: q.answerOk ?? null,
+    category_ok: q.categoryOk ?? null,
+    category_override: q.categoryOverride ?? null,
+    difficulty_ok: q.difficultyOk ?? null,
+    difficulty_override: q.difficultyOverride ?? null,
+    status_override: q.statusOverride ?? null,
+    status_override_justification: q.statusOverrideJustification ?? null,
+    comments: q.comments ?? [],
+    claimed_by: q.claimedBy ?? null,
+    claimed_by_name: q.claimedByName ?? null,
+    claimed_at: q.claimedAt ?? null,
+    assigned_to: q.assignedTo ?? null,
+    assigned_to_name: q.assignedToName ?? null,
+    requires_second_review: !!q.requiresSecondReview,
+    consensus_reviews: q.consensusReviews ?? [],
+    created_at: q.createdAt ?? null,
+    updated_at: q.updatedAt ?? null,
+    batch_label: q.batchLabel ?? null,
+    batch_uploaded_at: q.batchUploadedAt ?? null
+  };
+}
+
+export function buildProductionExportRecord(q: SATQuestion) {
   return {
     id: q.id,
     Section: q.Section || q.section || null,

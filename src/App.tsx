@@ -15,7 +15,7 @@ import ValidatorProgressModal from './components/ValidatorProgressModal';
 import Login from './components/Login';
 import UpdatePassword from './components/UpdatePassword';
 import { supabase, Profile } from './lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord } from './lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange } from './lib/mappers';
 import { getConsensusResolution } from './lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -596,46 +596,7 @@ export default function App() {
   // then clears local workspace state only without deleting database records. ---
   const deleteAllQuestions = async () => {
     if (questions.length > 0) {
-      const exportList = questions.map(q => ({
-        id: q.id,
-        section: q.Section || q.section || null,
-        category: q.category,
-        subSkill: q.subSkill || null,
-        questionType: q.questionType || 'mcq',
-        difficulty: q.difficulty,
-        passage: q.passage,
-        stimulus: q.stimulus || null,
-        imageUrl: q.imageUrl || null,
-        question: q.question,
-        choices: q.choices,
-        correct_answer: q.correct_answer,
-        explanation: q.explanation,
-        reviewStatus: q.reviewStatus || 'pending',
-        reviewedBy: q.claimedByName || q.assignedToName || null,
-        claimedBy: q.claimedByName || null,
-        claimedAt: q.claimedAt || null,
-        assignedTo: q.assignedToName || null,
-        checklist: {
-          formationOk: q.formationOk ?? null,
-          answerOk: q.answerOk ?? null,
-          categoryOk: q.categoryOk ?? null,
-          categoryOverride: q.categoryOverride || null,
-          difficultyOk: q.difficultyOk ?? null,
-          difficultyOverride: q.difficultyOverride || null
-        },
-        statusOverride: q.statusOverride || null,
-        statusOverrideJustification: q.statusOverrideJustification || null,
-        reviewerNote: q.reviewerNote || null,
-        comments: q.comments || [],
-        consensusReviews: q.consensusReviews || [],
-        requiresSecondReview: q.requiresSecondReview || false,
-        pipelineValidatorStatus: q.validatorStatus || null,
-        pipelineValidatorFeedback: q.validatorFeedback || null,
-        similarityScore: typeof q.similarity_score === 'number' ? q.similarity_score : null,
-        similarQuestionId: q.similar_question_id || null,
-        generatorRunId: q.generatorRunId || null,
-        createdAt: q.createdAt || null
-      }));
+      const exportList = questions.map(buildRawExportRecord);
 
       const blob = new Blob([JSON.stringify(exportList, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -1536,24 +1497,7 @@ export default function App() {
       return;
     }
 
-    const productionRecords = approved.map(q => ({
-      id: q.id,
-      stem: q.question,
-      question_type: q.questionType || 'mcq',
-      choices: q.choices,
-      correct_answer: q.correct_answer,
-      explanation: q.explanation,
-      category: q.category,
-      sub_skill: q.subSkill || null,
-      difficulty: q.difficulty,
-      passage: q.passage,
-      stimulus: q.stimulus || null,
-      image_url: q.imageUrl || null,
-      generator_run_id: q.generatorRunId || null,
-      status: 'validated',
-      validated_at: new Date().toISOString(),
-      created_at: q.createdAt || null
-    }));
+    const productionRecords = approved.map(buildProductionBankRecord);
 
     const blob = new Blob([JSON.stringify(productionRecords, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1596,11 +1540,7 @@ export default function App() {
       return;
     }
     const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
-    const approvedInRange = questions.filter(q => {
-      if (q.reviewStatus !== 'approved') return false;
-      const dateKey = toLocalDateKey(q.updatedAt || q.createdAt);
-      return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
-    });
+    const approvedInRange = questions.filter(q => isApprovedInDateRange(q, fromKey, toKey));
     if (approvedInRange.length === 0) {
       showToast(`No questions were approved between ${rangeStart} and ${rangeEnd}.`, 'error');
       return;
@@ -1649,52 +1589,6 @@ export default function App() {
   const questionsInBucket = (bucket: ExportBucket) =>
     bucket === 'all' ? questions : questions.filter(q => (q.reviewStatus || 'pending') === bucket);
 
-  // One record shape shared by all 4 buckets and both output formats, so
-  // "Total Test Bank" isn't a special case — it's just the 'all' bucket
-  // through the same builder. Includes the full question content, the
-  // review checklist + overrides, comments, consensus reviews,
-  // claim/assignment info, and the pipeline's own validator verdict.
-  const buildExportRecord = (q: SATQuestion) => ({
-    id: q.id,
-    section: q.Section || q.section || null,
-    category: q.category,
-    subSkill: q.subSkill || null,
-    questionType: q.questionType || 'mcq',
-    difficulty: q.difficulty,
-    passage: q.passage,
-    stimulus: q.stimulus || null,
-    imageUrl: q.imageUrl || null,
-    question: q.question,
-    choices: q.choices,
-    correct_answer: q.correct_answer,
-    explanation: q.explanation,
-    reviewStatus: q.reviewStatus || 'pending',
-    reviewedBy: q.claimedByName || q.assignedToName || null,
-    claimedBy: q.claimedByName || null,
-    claimedAt: q.claimedAt || null,
-    assignedTo: q.assignedToName || null,
-    checklist: {
-      formationOk: q.formationOk ?? null,
-      answerOk: q.answerOk ?? null,
-      categoryOk: q.categoryOk ?? null,
-      categoryOverride: q.categoryOverride || null,
-      difficultyOk: q.difficultyOk ?? null,
-      difficultyOverride: q.difficultyOverride || null
-    },
-    statusOverride: q.statusOverride || null,
-    statusOverrideJustification: q.statusOverrideJustification || null,
-    reviewerNote: q.reviewerNote || null,
-    comments: q.comments || [],
-    consensusReviews: q.consensusReviews || [],
-    requiresSecondReview: q.requiresSecondReview || false,
-    pipelineValidatorStatus: q.validatorStatus || null,
-    pipelineValidatorFeedback: q.validatorFeedback || null,
-    similarityScore: typeof q.similarity_score === 'number' ? q.similarity_score : null,
-    similarQuestionId: q.similar_question_id || null,
-    generatorRunId: q.generatorRunId || null,
-    createdAt: q.createdAt || null
-  });
-
   const exportBucketAsJson = (bucket: ExportBucket) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
@@ -1705,7 +1599,7 @@ export default function App() {
       showToast(`No ${EXPORT_BUCKET_LABELS[bucket].toLowerCase()} to export.`, 'error');
       return;
     }
-    const records = list.map(buildExportRecord);
+    const records = list.map(buildRawExportRecord);
 
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1741,7 +1635,7 @@ export default function App() {
       showToast('No questions to export.', 'error');
       return;
     }
-    const records = questions.map(buildExportRecord);
+    const records = questions.map(buildRawExportRecord);
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
