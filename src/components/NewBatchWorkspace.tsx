@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react';
 import { SATQuestion, FilterState, StatsSummary, QuestionComment, SortField, SortDirection, ValidatorInvite, MAX_CONSENSUS_REVIEWERS, QuestionSnapshot, ConsensusReview } from '../types';
 import StatsGrid from './StatsGrid';
 import FiltersPanel from './FiltersPanel';
@@ -8,7 +8,7 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange } from '../lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -26,7 +26,8 @@ import {
   ChevronDown,
   FileSpreadsheet,
   Download,
-  Tag
+  Tag,
+  CalendarRange
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -162,6 +163,60 @@ export default function NewBatchWorkspace({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [isRangeExportOpen]);
+
+  // Keep the date-range export popover fully inside the viewport: flip it to
+  // open ABOVE the trigger button when there isn't enough room below it.
+  const [rangePopupAbove, setRangePopupAbove] = useState(false);
+  useLayoutEffect(() => {
+    if (!isRangeExportOpen) return;
+    const wrap = rangeExportMenuRef.current;
+    if (!wrap) return;
+    const btn = wrap.querySelector('button');
+    const popup = wrap.querySelector('[data-range-popup]');
+    if (!btn || !popup) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const popupHeight = (popup as HTMLElement).offsetHeight;
+    const spaceBelow = window.innerHeight - wrapRect.bottom;
+    const spaceAbove = wrapRect.top;
+    setRangePopupAbove(popupHeight > spaceBelow && popupHeight <= spaceAbove);
+  }, [isRangeExportOpen]);
+
+  // --- Raw Export dropdown (Export All / Export Raw Date Range). "Export All"
+  // keeps the original one-click export; "Export Raw (Date Range)" opens a
+  // date picker that filters raw questions by created_at before exporting with
+  // the SAME full raw/new-batch schema (buildRawExportRecord).
+  const [isRawExportMenuOpen, setIsRawExportMenuOpen] = useState(false);
+  const rawExportMenuRef = useRef<HTMLDivElement>(null);
+  const [rawRangeOpen, setRawRangeOpen] = useState(false);
+  const [rawRangeFrom, setRawRangeFrom] = useState<string>(todayKey);
+  const [rawRangeTo, setRawRangeTo] = useState<string>(todayKey);
+  // Flip the raw date-range popup to open above when there isn't enough room
+  // below, so it is never clipped by the viewport.
+  const [rawRangePopupAbove, setRawRangePopupAbove] = useState(false);
+  useLayoutEffect(() => {
+    if (!rawRangeOpen) return;
+    const wrap = rawExportMenuRef.current;
+    if (!wrap) return;
+    const btn = wrap.querySelector('button');
+    const popup = wrap.querySelector('[data-raw-range-popup]');
+    if (!btn || !popup) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const popupHeight = (popup as HTMLElement).offsetHeight;
+    const spaceBelow = window.innerHeight - wrapRect.bottom;
+    const spaceAbove = wrapRect.top;
+    setRawRangePopupAbove(popupHeight > spaceBelow && popupHeight <= spaceAbove);
+  }, [rawRangeOpen]);
+  useEffect(() => {
+    if (!isRawExportMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (rawExportMenuRef.current && !rawExportMenuRef.current.contains(e.target as Node)) {
+        setIsRawExportMenuOpen(false);
+        setRawRangeOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [isRawExportMenuOpen]);
 
   // --- Merge into Curator (admin-only) ---
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
@@ -1193,6 +1248,48 @@ export default function NewBatchWorkspace({
     logEvent('note', `Exported ${records.length} question(s) — Raw (full detail)`);
   };
 
+  // --- Date-wise RAW export. Same full raw/new-batch schema as the one-click
+  // Export Raw (buildRawExportRecord), but filtered to a created_at date range
+  // (inclusive). Only the date filter differs — validator details, stimulus,
+  // batch metadata and every other raw field are preserved exactly.
+  const downloadRawRangeExport = (fromKey: string, toKey: string) => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    if (!fromKey || !toKey) {
+      showToast('Pick both a from and to date to export.', 'error');
+      return;
+    }
+    if (fromKey > toKey) {
+      showToast('The "From" date cannot be after the "To" date.', 'error');
+      return;
+    }
+    const inRange = questions.filter(q => isRawInDateRange(q, fromKey, toKey));
+    if (inRange.length === 0) {
+      showToast(`No raw questions found between ${fromKey} and ${toKey}.`, 'error');
+      return;
+    }
+    const records = inRange.map(buildRawExportRecord);
+    const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', url);
+    const rangeLabel = fromKey === toKey ? fromKey : `${fromKey}_to_${toKey}`;
+    downloadAnchor.setAttribute('download', `new-batch-raw-export-${rangeLabel}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    setTimeout(() => {
+      document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+    }, 100);
+
+    showToast(`Exported ${records.length} raw question(s) created between ${fromKey} and ${toKey}.`, 'success');
+    logEvent('note', `Exported ${records.length} raw question(s) for ${fromKey} to ${toKey} (full detail)`);
+    setIsRawExportMenuOpen(false);
+    setRawRangeOpen(false);
+  };
+
   // --- Production question bank export for this New Batch pool. Produces the
   // exact same `production_bank` format as the main Curator tab (the MySAT AI
   // Coach production schema, README §1) — shared builder, so both workspaces
@@ -1387,224 +1484,334 @@ export default function NewBatchWorkspace({
 
   return (
     <>
-      {/* Banner + upload */}
-      <div className="mb-6 bg-linear-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
-        <div className="relative z-10 space-y-1">
-          <h2 className="text-base font-bold tracking-tight">New Batch — Isolated Review Queue</h2>
-          <p className="text-xs text-zinc-500 font-normal leading-relaxed max-w-xl">
+      {/* Dedicated New Batch card.
+          NOTE: no overflow-hidden here — the card hosts absolutely-positioned
+          export popovers (date-range / more-exports). An overflow-hidden on this
+          container would clip those popovers against the card bounds, hiding the
+          From/To fields and action buttons. The white card background is flat, so
+          removing overflow-hidden has no visual downside for the rounded corners. */}
+      <div className="bg-white border border-[#e4e4e7] rounded-xl shadow-sm mb-6">
+        {/* Card header */}
+        <div className="px-6 pt-6 pb-0">
+          <h2 className="text-lg font-bold tracking-tight text-zinc-900">New Batch — Isolated Review Queue</h2>
+          <p className="text-xs text-zinc-500 font-normal leading-relaxed max-w-2xl mt-1">
             Upload a fresh batch of generated questions here for a completely separate validation pass — this pool never touches the main Curator data until you explicitly merge it in.
           </p>
         </div>
-        <div className="relative z-10 flex flex-wrap gap-2 w-full md:w-auto">
-          {isAdmin && (
-            <>
-              <div className="relative flex-1 md:flex-none md:w-52">
-                <Tag className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+
+        {isAdmin && (
+          <div className="p-6">
+            {/* Batch control row — inputs/actions that create & manage the batch */}
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="relative flex-1 min-w-52 md:flex-none md:w-64">
+                <Tag className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   value={nextBatchLabel}
                   onChange={(e) => setNextBatchLabel(e.target.value)}
                   placeholder="Batch label (optional)"
                   title="Name for this upload's batch — shown to validators as a filter. Leave blank to use the upload date/time."
-                  className="w-full pl-8 pr-2.5 py-2.5 text-xs font-semibold rounded-xl border border-[#e4e4e7] bg-white text-zinc-900 placeholder:text-zinc-500 placeholder:font-normal focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1]"
+                  className="w-full h-10 pl-9 pr-3 text-xs font-semibold rounded-lg border border-[#e4e4e7] bg-white text-zinc-900 placeholder:text-zinc-500 placeholder:font-normal focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1]"
                 />
               </div>
               <input type="file" accept=".json" multiple ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
               <button
                 onClick={() => fileInputRef.current?.click()}
                 title="Select one or more JSON files to upload into the New Batch pool"
-                className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 bg-[#ececed] hover:bg-[#e4e4e7] text-zinc-900 text-xs font-bold rounded-xl border border-[#e4e4e7] transition-all cursor-pointer"
+                className="inline-flex flex-1 md:flex-none items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border border-[#e4e4e7] bg-[#fafafa] hover:bg-[#f2f2f3] text-zinc-700 transition-all cursor-pointer"
               >
-                <Upload className="w-3.5 h-3.5 text-zinc-600" /> Upload New Batch JSON
+                <Upload className="w-4 h-4 text-zinc-600" /> Upload New Batch JSON
               </button>
               <button
                 onClick={() => setMergeModalOpen(true)}
                 disabled={questions.length === 0}
                 title="Push validated items from this batch into the main Curator questions table"
-                className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${questions.length === 0 ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed' : 'bg-[#6366f1] hover:bg-indigo-700 text-white border-[#6366f1] shadow-xs'}`}
-              >
-                <GitMerge className="w-3.5 h-3.5" /> Merge into Curator
-              </button>
-
-              {/* Distinct production question bank export — MySAT AI Coach
-                  production schema (same `production_bank` format as the
-                  Curator tab). One complete record per approved question. */}
-              <button
-                onClick={downloadProductionBank}
-                disabled={stats.approved === 0}
-                title="Export approved New Batch questions in the production data model MySAT AI Coach consumes"
-                className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${stats.approved === 0
+                className={`inline-flex flex-1 md:flex-none items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+                  questions.length === 0
                     ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                    : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-700 shadow-xs'
-                  }`}
+                    : 'bg-[#6366f1] hover:bg-indigo-700 text-white border-[#6366f1] shadow-xs'
+                }`}
               >
-                <Download className="w-3.5 h-3.5" />
-                Export Production Bank
+                <GitMerge className="w-4 h-4" /> Merge into Curator
               </button>
+            </div>
 
-              {/* Standalone raw export — full internal record for every
-                  question in this New Batch pool. One click, no dropdown. */}
-              <button
-                onClick={downloadRawExport}
-                disabled={questions.length === 0}
-                title="Export every New Batch question with the full internal/validator-detail schema"
-                className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${questions.length === 0
-                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                    : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
-                  }`}
-              >
-                <Download className="w-3.5 h-3.5" />
-                Export Raw
-              </button>
+            <div className="my-5 border-t border-[#e4e4e7]" />
 
-              {/* Standalone date-range popover — the new-schema export for
-                  student app hand-off, scoped to this New Batch pool. Its
-                  own button/popover so it's never confused with "Export
-                  Raw" or the bucketed dropdown below. Schema: id, Section,
-                  category, question, passage, choices, correct_answer,
-                  explanation, difficulty. */}
-              <div className="relative" ref={rangeExportMenuRef}>
+            {/* Export action group — separate from batch controls, one row of
+                equal-height buttons with clear visual hierarchy */}
+            <div className="flex flex-col xl:flex-row xl:items-center gap-4">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 shrink-0 w-20">
+                Export
+              </span>
+              <div className="flex flex-wrap items-center gap-2.5 flex-1">
                 <button
-                  onClick={() => setIsRangeExportOpen(open => !open)}
-                  title="Export approved New Batch questions (student app schema) for a date range"
-                  className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Export Approved (Date Range)
-                </button>
-
-                {isRangeExportOpen && (
-                  <div className="absolute right-0 mt-1.5 w-72 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5">
-                    <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
-                    <p className="text-[11px] text-zinc-500 mb-2">Only New Batch questions approved within the selected range</p>
-                    <div className="flex flex-col gap-2">
-                      <label className="text-[11px] font-semibold text-zinc-600">
-                        From
-                        <input
-                          type="date"
-                          value={exportRangeFrom}
-                          onChange={(e) => setExportRangeFrom(e.target.value)}
-                          className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                        />
-                      </label>
-                      <label className="text-[11px] font-semibold text-zinc-600">
-                        To
-                        <input
-                          type="date"
-                          value={exportRangeTo}
-                          onChange={(e) => setExportRangeTo(e.target.value)}
-                          className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                        />
-                      </label>
-                      <button
-                        onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
-                        disabled={!exportRangeFrom || !exportRangeTo}
-                        title="Download the selected range's approved New Batch questions in the student app schema"
-                        className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${!exportRangeFrom || !exportRangeTo
-                            ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                            : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
-                          }`}
-                      >
-                        <FileText className="w-3 h-3" /> Download JSON
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Bucketed export dropdown: Approved / Rejected / Needs
-                  Revision / Total New Batch Pool, each as JSON or Excel —
-                  mirrors the main Curator tab's export dropdown, scoped to
-                  this workspace's own questions_batch2 pool. Renamed to
-                  "More Exports" now that Raw / Date-Range each have their
-                  own dedicated button above. */}
-              <div className="relative" ref={exportMenuRef}>
-                <button
-                  onClick={() => setIsExportMenuOpen(open => !open)}
-                  disabled={questions.length === 0}
-                  title="More export options for this New Batch pool"
-                  className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all cursor-pointer ${questions.length === 0
+                  onClick={downloadProductionBank}
+                  disabled={stats.approved === 0}
+                  title="Export approved New Batch questions in the production data model MySAT AI Coach consumes"
+                  className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+                    stats.approved === 0
                       ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
                       : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-700 shadow-xs'
-                    }`}
+                  }`}
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  More Exports
-                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+                  <Download className="w-4 h-4" />
+                  Export Production Bank
                 </button>
 
-                {isExportMenuOpen && (
-                  <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
-                    {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
-                      const count = questionsInBucket(bucket).length;
-                      const isEmpty = count === 0;
-                      return (
-                        <div
-                          key={bucket}
-                          className={`flex items-center justify-between gap-2 px-3.5 py-2.5 ${idx !== 0 ? 'border-t border-[#e4e4e7]' : ''}`}
-                        >
-                          <div className="min-w-0">
-                            <p className="text-xs font-bold text-zinc-900 truncate">{EXPORT_BUCKET_LABELS[bucket]}</p>
-                            <p className="text-[11px] text-zinc-500">{count} question{count === 1 ? '' : 's'}</p>
-                          </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              onClick={() => exportBucketAsJson(bucket)}
-                              disabled={isEmpty}
-                              title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as JSON`}
-                              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${isEmpty
-                                  ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                                  : 'bg-[#f2f2f3] text-zinc-600 border-[#e4e4e7] hover:bg-zinc-900 hover:text-white'
-                                }`}
-                            >
-                              <FileText className="w-3 h-3" /> JSON
-                            </button>
-                            <button
-                              onClick={() => exportBucketAsExcel(bucket)}
-                              disabled={isEmpty}
-                              title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as Excel`}
-                              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${isEmpty
-                                  ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                                  : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-700 hover:text-white'
-                                }`}
-                            >
-                              <FileSpreadsheet className="w-3 h-3" /> XLSX
-                            </button>
-                          </div>
+                <div className="relative" ref={rawExportMenuRef}>
+                  <button
+                    onClick={() => {
+                      setIsRawExportMenuOpen(open => !open);
+                      setRawRangeOpen(false);
+                    }}
+                    disabled={questions.length === 0}
+                    title="Export every New Batch question with the full internal/validator-detail schema — either the whole pool or a date range"
+                    className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+                      questions.length === 0
+                        ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                        : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
+                    }`}
+                  >
+                    <Download className="w-4 h-4" />
+                    Export Raw
+                    <ChevronDown className={`w-4 h-4 transition-transform ${isRawExportMenuOpen && !rawRangeOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {isRawExportMenuOpen && !rawRangeOpen && (
+                    <div className="absolute right-0 mt-1.5 w-64 max-w-[calc(100vw-1.5rem)] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
+                      <button
+                        onClick={() => { downloadRawExport(); setIsRawExportMenuOpen(false); }}
+                        disabled={questions.length === 0}
+                        title="Export every New Batch question (all review statuses), full detail"
+                        className="w-full flex items-center gap-2.5 px-3.5 py-3 text-left hover:bg-[#f2f2f3] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <FileText className="w-4 h-4 text-zinc-500 shrink-0" />
+                        <span className="min-w-0">
+                          <span className="block text-xs font-semibold text-zinc-900">Export All Raw</span>
+                          <span className="block text-[11px] text-zinc-500">Every question, full internal schema</span>
+                        </span>
+                      </button>
+                      <div className="border-t border-[#e4e4e7]" />
+                      <button
+                        onClick={() => setRawRangeOpen(true)}
+                        disabled={questions.length === 0}
+                        title="Export raw questions created within a date range"
+                        className="w-full flex items-center gap-2.5 px-3.5 py-3 text-left hover:bg-[#f2f2f3] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <CalendarRange className="w-4 h-4 text-[#4f46e5] shrink-0" />
+                        <span className="min-w-0">
+                          <span className="block text-xs font-semibold text-zinc-900">Export Raw (Date Range)</span>
+                          <span className="block text-[11px] text-zinc-500">Filter by created date</span>
+                        </span>
+                      </button>
+                    </div>
+                  )}
+
+                  {isRawExportMenuOpen && rawRangeOpen && (
+                    <div
+                      data-raw-range-popup
+                      className={`absolute right-0 w-72 max-w-[calc(100vw-1.5rem)] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5 ${
+                        rawRangePopupAbove ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
+                      }`}
+                    >
+                      <p className="text-xs font-bold text-zinc-900">Raw Questions Export</p>
+                      <p className="text-[11px] text-zinc-500 mb-2">
+                        Select the date range for the raw New Batch questions to export (full internal schema).
+                      </p>
+                      <div className="flex flex-col gap-2">
+                        <label className="text-[11px] font-semibold text-zinc-600">
+                          From
+                          <input
+                            type="date"
+                            value={rawRangeFrom}
+                            onChange={(e) => setRawRangeFrom(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                          />
+                        </label>
+                        <label className="text-[11px] font-semibold text-zinc-600">
+                          To
+                          <input
+                            type="date"
+                            value={rawRangeTo}
+                            onChange={(e) => setRawRangeTo(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                          />
+                        </label>
+                        <div className="mt-1 flex items-center justify-end gap-2">
+                          <button
+                            onClick={() => { setRawRangeOpen(false); setIsRawExportMenuOpen(false); }}
+                            title="Cancel the raw date range export"
+                            className="px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-[#e4e4e7] bg-[#fafafa] text-zinc-700 hover:bg-[#f2f2f3] transition-all cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => downloadRawRangeExport(rawRangeFrom, rawRangeTo)}
+                            title="Download raw questions created within the selected range"
+                            className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-zinc-800 bg-zinc-800 text-white hover:bg-zinc-900 transition-all cursor-pointer"
+                          >
+                            <Download className="w-3 h-3" /> Export Raw
+                          </button>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="relative" ref={rangeExportMenuRef}>
+                  <button
+                    onClick={() => setIsRangeExportOpen(open => !open)}
+                    title="Export approved New Batch questions (student app schema) for a date range"
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
+                  >
+                    <Download className="w-4 h-4" />
+                    Export Approved (Date Range)
+                  </button>
+
+                  {isRangeExportOpen && (
+                    <div
+                      data-range-popup
+                      className={`absolute right-0 w-72 max-w-[calc(100vw-1.5rem)] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5 ${
+                        rangePopupAbove ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
+                      }`}
+                    >
+                      <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
+                      <p className="text-[11px] text-zinc-500 mb-2">Only New Batch questions approved within the selected range</p>
+                      <div className="flex flex-col gap-2">
+                        <label className="text-[11px] font-semibold text-zinc-600">
+                          From
+                          <input
+                            type="date"
+                            value={exportRangeFrom}
+                            onChange={(e) => setExportRangeFrom(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                          />
+                        </label>
+                        <label className="text-[11px] font-semibold text-zinc-600">
+                          To
+                          <input
+                            type="date"
+                            value={exportRangeTo}
+                            onChange={(e) => setExportRangeTo(e.target.value)}
+                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                          />
+                        </label>
+                        <button
+                          onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
+                          disabled={!exportRangeFrom || !exportRangeTo}
+                          title="Download the selected range's approved New Batch questions in the student app schema"
+                          className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                            !exportRangeFrom || !exportRangeTo
+                              ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                              : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                          }`}
+                        >
+                          <FileText className="w-3 h-3" /> Download JSON
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="relative" ref={exportMenuRef}>
+                  <button
+                    onClick={() => setIsExportMenuOpen(open => !open)}
+                    disabled={questions.length === 0}
+                    title="More export options for this New Batch pool"
+                    className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+                      questions.length === 0
+                        ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                        : 'bg-[#f2f2f3] hover:bg-[#e4e4e7] text-zinc-700 border-[#e4e4e7]'
+                    }`}
+                  >
+                    <Download className="w-4 h-4" />
+                    More Exports
+                    <ChevronDown className={`w-4 h-4 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {isExportMenuOpen && (
+                    <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
+                      {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
+                        const count = questionsInBucket(bucket).length;
+                        const isEmpty = count === 0;
+                        return (
+                          <div
+                            key={bucket}
+                            className={`flex items-center justify-between gap-2 px-3.5 py-2.5 ${idx !== 0 ? 'border-t border-[#e4e4e7]' : ''}`}
+                          >
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold text-zinc-900 truncate">{EXPORT_BUCKET_LABELS[bucket]}</p>
+                              <p className="text-[11px] text-zinc-500">{count} question{count === 1 ? '' : 's'}</p>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                onClick={() => exportBucketAsJson(bucket)}
+                                disabled={isEmpty}
+                                title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as JSON`}
+                                className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                                  isEmpty
+                                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                                    : 'bg-[#f2f2f3] text-zinc-600 border-[#e4e4e7] hover:bg-zinc-900 hover:text-white'
+                                }`}
+                              >
+                                <FileText className="w-3 h-3" /> JSON
+                              </button>
+                              <button
+                                onClick={() => exportBucketAsExcel(bucket)}
+                                disabled={isEmpty}
+                                title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as Excel`}
+                                className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                                  isEmpty
+                                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                                    : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-700 hover:text-white'
+                                }`}
+                              >
+                                <FileSpreadsheet className="w-3 h-3" /> XLSX
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
 
+              {/* Contextual destructive "clear" — visually separated from exports */}
               <button
                 onClick={handleClearAllQuestions}
                 title="Clear the New Batch workspace"
-                className="p-2.5 text-zinc-500 hover:text-rose-600 border border-[#e4e4e7] hover:bg-rose-50 rounded-xl transition-all cursor-pointer bg-[#fafafa]"
+                className="inline-flex items-center justify-center gap-1.5 px-3 h-10 text-xs font-semibold rounded-lg border border-transparent text-rose-500 hover:text-rose-700 hover:bg-rose-50 hover:border-rose-200 transition-all cursor-pointer"
               >
                 <Trash2 className="w-4 h-4" />
+                Clear
               </button>
-            </>
-          )}
-        </div>
-      </div>
+            </div>
 
-      {isAdmin && (
-        <div
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className={`transition-all rounded-2xl border-2 border-dashed flex flex-col items-center justify-center p-8 mb-6 ${dragOver ? 'border-[#6366f1] bg-[#f2f2f3]/50 py-12 scale-[0.99] text-[#4f46e5] shadow-inner' : 'border-[#e4e4e7] bg-transparent py-4 text-zinc-500'}`}
-        >
-          <div className="flex flex-col sm:flex-row items-center gap-3">
-            <Upload className={`w-5 h-5 ${dragOver ? 'text-[#4f46e5] animate-bounce' : 'text-zinc-500'}`} />
-            <p className="text-xs font-medium text-center">
-              {dragOver ? 'Drop one or more New Batch JSON files here!' : 'Drag and drop New Batch JSON files onto this panel — isolated from the main Curator pool.'}
-            </p>
+            {/* Compact drop zone */}
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`mt-5 transition-all rounded-xl border-2 border-dashed flex flex-col items-center justify-center min-h-16 px-4 ${
+                dragOver
+                  ? 'border-[#6366f1] bg-[#f2f2f3]/50 text-[#4f46e5] shadow-inner'
+                  : 'border-[#e4e4e7] bg-[#fafafa]/50 text-zinc-500'
+              }`}
+            >
+              <div className="flex flex-col sm:flex-row items-center gap-2 py-3">
+                <Upload className={`w-4 h-4 ${dragOver ? 'text-[#4f46e5] animate-bounce' : 'text-zinc-500'}`} />
+                <p className="text-xs font-medium text-center">
+                  {dragOver
+                    ? 'Drop one or more New Batch JSON files here!'
+                    : 'Drag &amp; drop New Batch JSON files here, or use "Upload New Batch JSON" — isolated from the main Curator pool.'}
+                </p>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       <StatsGrid stats={stats} activeStatusFilter={filters.status} onSelectStatusFilter={(status) => setFilters(prev => ({ ...prev, status }))} />
       <StatsCharts stats={stats} />

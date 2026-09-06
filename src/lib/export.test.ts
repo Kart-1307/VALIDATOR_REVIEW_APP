@@ -4,7 +4,8 @@ import {
   buildRawExportRecord,
   buildProductionExportRecord,
   toLocalDateKey,
-  isApprovedInDateRange
+  isApprovedInDateRange,
+  isRawInDateRange
 } from './mappers';
 import type { SATQuestion } from '../types';
 
@@ -267,6 +268,48 @@ describe('isApprovedInDateRange', () => {
   it('returns false when a date is missing/invalid', () => {
     expect(isApprovedInDateRange(makeQuestion({ reviewStatus: 'approved', updatedAt: null, createdAt: null }), '2026-09-06', '2026-09-06')).toBe(false);
     expect(isApprovedInDateRange(approvedOn('2026-09-06'), '', '2026-09-06')).toBe(false);
+  });
+});
+
+// --- Date-wise RAW export filter -------------------------------------------
+
+describe('isRawInDateRange (raw date-range filter)', () => {
+  const createdOn = (dateKey: string, status: SATQuestion['reviewStatus'] = 'pending') =>
+    makeQuestion({ reviewStatus: status, createdAt: `${dateKey}T10:00:00.000Z` });
+
+  it('includes raw questions regardless of review status', () => {
+    const pending = createdOn('2026-09-06', 'pending');
+    const approved = createdOn('2026-09-06', 'approved');
+    const rejected = createdOn('2026-09-06', 'rejected');
+    expect(isRawInDateRange(pending, '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(approved, '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(rejected, '2026-09-06', '2026-09-06')).toBe(true);
+  });
+
+  it('filters by a single day (inclusive) using created_at', () => {
+    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(createdOn('2026-09-05'), '2026-09-06', '2026-09-06')).toBe(false);
+  });
+
+  it('supports multi-day ranges (inclusive endpoints)', () => {
+    expect(isRawInDateRange(createdOn('2026-09-05'), '2026-09-05', '2026-09-07')).toBe(true);
+    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-05', '2026-09-07')).toBe(true);
+    expect(isRawInDateRange(createdOn('2026-09-07'), '2026-09-05', '2026-09-07')).toBe(true);
+    expect(isRawInDateRange(createdOn('2026-09-08'), '2026-09-05', '2026-09-07')).toBe(false);
+  });
+
+  it('handles a reversed (from > to) range the same as sorted', () => {
+    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-07', '2026-09-05')).toBe(true);
+  });
+
+  it('returns false when there are no matching questions in range', () => {
+    expect(isRawInDateRange(createdOn('2026-09-01'), '2026-09-06', '2026-09-06')).toBe(false);
+  });
+
+  it('returns false when a date is missing or invalid', () => {
+    expect(isRawInDateRange(makeQuestion({ createdAt: null, updatedAt: null }), '2026-09-06', '2026-09-06')).toBe(false);
+    expect(isRawInDateRange(createdOn('2026-09-06'), '', '2026-09-06')).toBe(false);
+    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-06', '')).toBe(false);
   });
 });
 

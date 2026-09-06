@@ -79,6 +79,24 @@ export function isApprovedInDateRange(
   return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
 }
 
+// Shared date-range filter for the date-wise RAW export. Unlike
+// isApprovedInDateRange this does NOT require the approved status — it matches
+// every raw question (regardless of review_status) whose business date falls
+// within the inclusive range. The business date is `created_at` (question
+// creation), the same createdAt field the New Batch workspace's existing
+// date filter already uses (see NewBatchWorkspace: filters.dateFrom/dateTo).
+// `fromKey`/`toKey` are inclusive yyyy-mm-dd local-date keys.
+export function isRawInDateRange(
+  q: { createdAt?: string | null; updatedAt?: string | null },
+  fromKey: string,
+  toKey: string
+): boolean {
+  if (!q || !fromKey || !toKey) return false;
+  const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
+  const dateKey = toLocalDateKey(q.createdAt || q.updatedAt);
+  return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
+}
+
 // Clean text for production JSON exports. Keep meaningful SAT content intact while
 // removing BOM/zero-width characters and normalizing line endings/Unicode form so
 // exported files do not contain hidden encoding artifacts. JSON.stringify emits

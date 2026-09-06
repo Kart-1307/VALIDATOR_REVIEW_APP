@@ -2038,187 +2038,90 @@ export default function App() {
             >
               <LogOut className="w-4 h-4" />
             </button>
-
-            {/* Exports are an admin-only action — validators/auditors never see these */}
-            {isAdmin && (
-              <>
-                <span className="h-4 w-px bg-[#e4e4e7] mx-1" />
-
-                {/* Distinct production question bank export (spec §10, §12, §13) — untouched */}
-                <button
-                  onClick={downloadProductionBank}
-                  disabled={stats.approved === 0}
-                  title="Export approved questions in the production data model MySAT AI Coach consumes"
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${stats.approved === 0
-                      ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                      : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-700 shadow-xs'
-                    }`}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Export Production Bank
-                </button>
-
-                {/* Standalone raw export — full internal record (checklist,
-                    comments, consensus, claim info, pipeline verdict) for
-                    every question. One click, no dropdown to fish through. */}
-                <button
-                  onClick={downloadRawExport}
-                  disabled={questions.length === 0}
-                  title="Export every question with the full internal/validator-detail schema"
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${questions.length === 0
-                      ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                      : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
-                    }`}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Export Raw
-                </button>
-
-                {/* Standalone date-range popover — the new-schema export for
-                    student app hand-off. Its own button/popover so it's
-                    never confused with "Export Raw" or the bucketed dropdown
-                    below. Schema: id, Section, category, question, passage,
-                    choices, correct_answer, explanation, difficulty. */}
-                <div className="relative" ref={rangeExportMenuRef}>
-                  <button
-                    onClick={() => setIsRangeExportOpen(open => !open)}
-                    title="Export approved questions (student app schema) for a date range"
-                    className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Export Approved (Date Range)
-                  </button>
-
-                  {isRangeExportOpen && (
-                    <div className="absolute right-0 mt-1.5 w-72 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5">
-                      <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
-                      <p className="text-[11px] text-zinc-500 mb-2">Only questions approved within the selected range</p>
-                      <div className="flex flex-col gap-2">
-                        <label className="text-[11px] font-semibold text-zinc-600">
-                          From
-                          <input
-                            type="date"
-                            value={exportRangeFrom}
-                            onChange={(e) => setExportRangeFrom(e.target.value)}
-                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                          />
-                        </label>
-                        <label className="text-[11px] font-semibold text-zinc-600">
-                          To
-                          <input
-                            type="date"
-                            value={exportRangeTo}
-                            onChange={(e) => setExportRangeTo(e.target.value)}
-                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                          />
-                        </label>
-                        <button
-                          onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
-                          disabled={!exportRangeFrom || !exportRangeTo}
-                          title="Download the selected range's approved questions in the student app schema"
-                          className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${!exportRangeFrom || !exportRangeTo
-                              ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                              : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
-                            }`}
-                        >
-                          <FileText className="w-3 h-3" /> Download JSON
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Bucketed export dropdown: Approved / Rejected / Needs Revision /
-                    Total Test Bank, each as JSON or Excel — replaces the old
-                    separate Export Test Bank / Export Excel / Export Rejected buttons.
-                    Renamed to "More Exports" now that Production Bank / Raw /
-                    Date-Range each have their own dedicated button above. */}
-                <div className="relative" ref={exportMenuRef}>
-                  <button
-                    onClick={() => setIsExportMenuOpen(open => !open)}
-                    className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer bg-[#6366f1] hover:bg-indigo-700 text-white border-[#6366f1] shadow-xs"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    More Exports
-                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
-                  </button>
-
-                  {isExportMenuOpen && (
-                    <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
-                      {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
-                        const count = questionsInBucket(bucket).length;
-                        const isEmpty = count === 0;
-                        return (
-                          <div
-                            key={bucket}
-                            className={`flex items-center justify-between gap-2 px-3.5 py-2.5 ${idx !== 0 ? 'border-t border-[#e4e4e7]' : ''}`}
-                          >
-                            <div className="min-w-0">
-                              <p className="text-xs font-bold text-zinc-900 truncate">{EXPORT_BUCKET_LABELS[bucket]}</p>
-                              <p className="text-[11px] text-zinc-500">{count} question{count === 1 ? '' : 's'}</p>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                onClick={() => exportBucketAsJson(bucket)}
-                                disabled={isEmpty}
-                                title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as JSON`}
-                                className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${isEmpty
-                                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                                    : 'bg-[#f2f2f3] text-zinc-600 border-[#e4e4e7] hover:bg-zinc-900 hover:text-white'
-                                  }`}
-                              >
-                                <FileText className="w-3 h-3" /> JSON
-                              </button>
-                              <button
-                                onClick={() => exportBucketAsExcel(bucket)}
-                                disabled={isEmpty}
-                                title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as Excel`}
-                                className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${isEmpty
-                                    ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                                    : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-700 hover:text-white'
-                                  }`}
-                              >
-                                <FileSpreadsheet className="w-3 h-3" /> XLSX
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                <span className="h-4 w-px bg-[#e4e4e7] mx-1" />
-
-                {/* Admin-only "Start Fresh" action — deliberately placed at the
-                    far end of the toolbar, away from Sign Out, so it can't be
-                    clicked by mistake while reaching for that button. */}
-                <button
-                  onClick={handleClearAllQuestions}
-                  title="Clear current workspace items (admin only)"
-                  className="p-2 text-zinc-500 hover:text-rose-600 border border-[#e4e4e7] hover:bg-rose-50 rounded-lg transition-all cursor-pointer bg-[#fafafa]"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </>
-            )}
           </div>
         </div>
       </header>
+
+      {/* Clean horizontal navigation row directly below the header */}
+      <div className="border-b border-[#e4e4e7] bg-white/60 select-none">
+        <nav className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center gap-1 overflow-x-auto scrollbar-none">
+          <button
+            onClick={() => setActiveTab('curator')}
+            className={`flex items-center gap-2 px-3.5 py-3 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 border-b-2 -mb-px ${
+              activeTab === 'curator'
+                ? 'border-[#6366f1] text-[#4f46e5]'
+                : 'border-transparent text-zinc-500 hover:text-zinc-900'
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+            Curation Feed
+          </button>
+
+          <button
+            onClick={() => setActiveTab('newbatch')}
+            className={`flex items-center gap-2 px-3.5 py-3 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 border-b-2 -mb-px ${
+              activeTab === 'newbatch'
+                ? 'border-[#6366f1] text-[#4f46e5]'
+                : 'border-transparent text-zinc-500 hover:text-zinc-900'
+            }`}
+          >
+            <Upload className="w-4 h-4" />
+            New Batch
+          </button>
+
+          <button
+            onClick={() => setActiveTab('analytics')}
+            className={`flex items-center gap-2 px-3.5 py-3 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 border-b-2 -mb-px ${
+              activeTab === 'analytics'
+                ? 'border-[#6366f1] text-[#4f46e5]'
+                : 'border-transparent text-zinc-500 hover:text-zinc-900'
+            }`}
+          >
+            <PieChart className="w-4 h-4" />
+            Domain &amp; Sub-domain breakdown
+          </button>
+
+          <button
+            onClick={() => setActiveTab('audit')}
+            className={`flex items-center gap-2 px-3.5 py-3 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 border-b-2 -mb-px ${
+              activeTab === 'audit'
+                ? 'border-[#6366f1] text-[#4f46e5]'
+                : 'border-transparent text-zinc-500 hover:text-zinc-900'
+            }`}
+          >
+            <History className="w-4 h-4" />
+            Live Audit Trail History
+          </button>
+
+          {isAdmin && (
+            <button
+              onClick={() => setActiveTab('admin')}
+              className={`flex items-center gap-2 px-3.5 py-3 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 border-b-2 -mb-px ${
+                activeTab === 'admin'
+                  ? 'border-[#6366f1] text-[#4f46e5]'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-900'
+              }`}
+            >
+              <ShieldCheck className="w-4 h-4" />
+              Admin
+            </button>
+          )}
+        </nav>
+      </div>
 
       {/* Main Body Grid */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
 
         {/* Banner callout */}
-        <div className="mb-6 bg-linear-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative overflow-hidden flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
-          <div className="relative z-10 space-y-1">
-            <h2 className="text-base font-bold tracking-tight">Curation Action Center</h2>
+        <div className="mb-8 bg-linear-to-r from-[#fafafa] to-[#f2f2f3] text-zinc-900 rounded-2xl p-6 relative overflow-hidden flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-[#e4e4e7] shadow-sm">
+          <div className="relative z-10 space-y-1.5">
+            <h2 className="text-lg font-bold tracking-tight">Curation Action Center</h2>
             <p className="text-xs text-zinc-500 font-normal leading-relaxed max-w-xl">
               Audit questions, make inline corrections to text, and determine whether items are included in the official test bank. Upload questions directly via dragging one or more JSON files or download your approved curation below.
             </p>
           </div>
 
-          <div className="relative z-10 flex gap-2 w-full md:w-auto">
+          <div className="relative z-10 flex gap-2.5 w-full md:w-auto">
             {/* Uploading JSON banks is an admin-only action */}
             {isAdmin && (
               <>
@@ -2235,18 +2138,18 @@ export default function App() {
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   title="Select one or more JSON export files — they'll be merged into this session"
-                  className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 bg-[#ececed] hover:bg-[#e4e4e7] text-zinc-900 text-xs font-bold rounded-xl border border-[#e4e4e7] transition-all cursor-pointer"
+                  className="flex-1 md:flex-none inline-flex items-center justify-center gap-1.5 px-4 h-10 bg-[#ececed] hover:bg-[#e4e4e7] text-zinc-900 text-xs font-semibold rounded-lg border border-[#e4e4e7] transition-all cursor-pointer"
                 >
-                  <Upload className="w-3.5 h-3.5 text-zinc-600" /> Upload / Merge JSON Bank(s)
+                  <Upload className="w-4 h-4 text-zinc-600" /> Upload / Merge JSON Bank(s)
                 </button>
               </>
             )}
 
             <button
               onClick={() => setActiveTab('audit')}
-              className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 bg-[#fafafa] hover:bg-[#f2f2f3] text-zinc-700 text-xs font-bold rounded-xl border border-[#e4e4e7] transition-all cursor-pointer"
+              className="flex-1 md:flex-none inline-flex items-center justify-center gap-1.5 px-4 h-10 bg-[#fafafa] hover:bg-[#f2f2f3] text-zinc-700 text-xs font-semibold rounded-lg border border-[#e4e4e7] transition-all cursor-pointer"
             >
-              <FileText className="w-3.5 h-3.5 text-zinc-500" /> Audit Trail Log
+              <FileText className="w-4 h-4 text-zinc-500" /> Audit Trail Log
             </button>
           </div>
         </div>
@@ -2257,13 +2160,14 @@ export default function App() {
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            className={`transition-all rounded-2xl border-2 border-dashed flex flex-col items-center justify-center p-8 mb-6 ${dragOver
-                ? 'border-[#6366f1] bg-[#f2f2f3]/50 py-12 scale-[0.99] text-[#4f46e5] shadow-inner'
-                : 'border-[#e4e4e7] bg-transparent py-4 text-zinc-500'
-              }`}
+            className={`transition-all rounded-xl border-2 border-dashed flex flex-col items-center justify-center min-h-16 mb-8 px-4 ${
+              dragOver
+                ? 'border-[#6366f1] bg-[#f2f2f3]/50 text-[#4f46e5] shadow-inner'
+                : 'border-[#e4e4e7] bg-transparent text-zinc-500'
+            }`}
           >
-            <div className="flex flex-col sm:flex-row items-center gap-3">
-              <Upload className={`w-5 h-5 ${dragOver ? 'text-[#4f46e5] animate-bounce' : 'text-zinc-500'}`} />
+            <div className="flex flex-col sm:flex-row items-center gap-2 py-3">
+              <Upload className={`w-4 h-4 ${dragOver ? 'text-[#4f46e5] animate-bounce' : 'text-zinc-500'}`} />
               <p className="text-xs font-medium text-center">
                 {dragOver
                   ? 'Drop one or more SAT questions JSON files here to merge them in immediately!'
@@ -2272,66 +2176,6 @@ export default function App() {
             </div>
           </div>
         )}
-
-        {/* Workspace Windows and Navigation Tabs Selection Bar */}
-        <div className="flex border-b border-[#e4e4e7] mb-6 gap-2 select-none overflow-x-auto scrollbar-none">
-          <button
-            onClick={() => setActiveTab('curator')}
-            className={`px-4 py-2.5 text-xs font-bold transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap shrink-0 ${activeTab === 'curator'
-                ? 'border-[#6366f1] text-[#4f46e5]'
-                : 'border-transparent text-zinc-500 hover:text-zinc-900'
-              }`}
-          >
-            <Layers className="w-3.5 h-3.5 text-[#4f46e5]" />
-            Curation Feed
-          </button>
-
-          <button
-            onClick={() => setActiveTab('newbatch')}
-            className={`px-4 py-2.5 text-xs font-bold transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap shrink-0 ${activeTab === 'newbatch'
-                ? 'border-[#6366f1] text-[#4f46e5]'
-                : 'border-transparent text-zinc-500 hover:text-zinc-900'
-              }`}
-          >
-            <Upload className="w-3.5 h-3.5 text-[#4f46e5]" />
-            New Batch
-          </button>
-
-          <button
-            onClick={() => setActiveTab('analytics')}
-            className={`px-4 py-2.5 text-xs font-bold transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap shrink-0 ${activeTab === 'analytics'
-                ? 'border-[#6366f1] text-[#4f46e5]'
-                : 'border-transparent text-zinc-500 hover:text-zinc-900'
-              }`}
-          >
-            <PieChart className="w-3.5 h-3.5 text-[#4f46e5]" />
-            Domain &amp; Sub-domain breakdown
-          </button>
-
-          <button
-            onClick={() => setActiveTab('audit')}
-            className={`px-4 py-2.5 text-xs font-bold transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap shrink-0 ${activeTab === 'audit'
-                ? 'border-[#6366f1] text-[#4f46e5]'
-                : 'border-transparent text-zinc-500 hover:text-zinc-900'
-              }`}
-          >
-            <History className="w-3.5 h-3.5 text-[#4f46e5]" />
-            Live Audit Trail History
-          </button>
-
-          {isAdmin && (
-            <button
-              onClick={() => setActiveTab('admin')}
-              className={`px-4 py-2.5 text-xs font-bold transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap shrink-0 ${activeTab === 'admin'
-                  ? 'border-[#6366f1] text-[#4f46e5]'
-                  : 'border-transparent text-zinc-500 hover:text-zinc-900'
-                }`}
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-[#4f46e5]" />
-              Admin
-            </button>
-          )}
-        </div>
 
         {/* Render workspaces conditionally based on activeTab state */}
         {activeTab === 'newbatch' && (
@@ -2380,6 +2224,166 @@ export default function App() {
 
         {activeTab === 'curator' && (
           <>
+            {/* Export action group — the single logical home for Curator exports
+                (Production Bank / Raw / Date Range / More Exports). One row,
+                same height buttons, clear hierarchy. */}
+            {isAdmin && (
+              <div className="mb-6 bg-white border border-[#e4e4e7] rounded-xl shadow-sm p-4">
+                <div className="flex flex-col lg:flex-row lg:items-center gap-4">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 shrink-0 w-20">
+                    Export
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2.5 flex-1">
+                    <button
+                      onClick={downloadProductionBank}
+                      disabled={stats.approved === 0}
+                      title="Export approved questions in the production data model MySAT AI Coach consumes"
+                      className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+                        stats.approved === 0
+                          ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                          : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-700 shadow-xs'
+                      }`}
+                    >
+                      <Download className="w-4 h-4" />
+                      Export Production Bank
+                    </button>
+
+                    <button
+                      onClick={downloadRawExport}
+                      disabled={questions.length === 0}
+                      title="Export every question with the full internal/validator-detail schema"
+                      className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+                        questions.length === 0
+                          ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                          : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
+                      }`}
+                    >
+                      <Download className="w-4 h-4" />
+                      Export Raw
+                    </button>
+
+                    <div className="relative" ref={rangeExportMenuRef}>
+                      <button
+                        onClick={() => setIsRangeExportOpen(open => !open)}
+                        title="Export approved questions (student app schema) for a date range"
+                        className="inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
+                      >
+                        <Download className="w-4 h-4" />
+                        Export Approved (Date Range)
+                      </button>
+
+                      {isRangeExportOpen && (
+                        <div className="absolute right-0 mt-1.5 w-72 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5">
+                          <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
+                          <p className="text-[11px] text-zinc-500 mb-2">Only questions approved within the selected range</p>
+                          <div className="flex flex-col gap-2">
+                            <label className="text-[11px] font-semibold text-zinc-600">
+                              From
+                              <input
+                                type="date"
+                                value={exportRangeFrom}
+                                onChange={(e) => setExportRangeFrom(e.target.value)}
+                                className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                              />
+                            </label>
+                            <label className="text-[11px] font-semibold text-zinc-600">
+                              To
+                              <input
+                                type="date"
+                                value={exportRangeTo}
+                                onChange={(e) => setExportRangeTo(e.target.value)}
+                                className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
+                              />
+                            </label>
+                            <button
+                              onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
+                              disabled={!exportRangeFrom || !exportRangeTo}
+                              title="Download the selected range's approved questions in the student app schema"
+                              className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                                !exportRangeFrom || !exportRangeTo
+                                  ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                                  : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                              }`}
+                            >
+                              <FileText className="w-3 h-3" /> Download JSON
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="relative" ref={exportMenuRef}>
+                      <button
+                        onClick={() => setIsExportMenuOpen(open => !open)}
+                        className="inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer bg-[#f2f2f3] hover:bg-[#e4e4e7] text-zinc-700 border-[#e4e4e7]"
+                      >
+                        <Download className="w-4 h-4" />
+                        More Exports
+                        <ChevronDown className={`w-4 h-4 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {isExportMenuOpen && (
+                        <div className="absolute right-0 mt-1.5 w-88 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
+                          {(['approved', 'rejected', 'needs_revision', 'all'] as ExportBucket[]).map((bucket, idx) => {
+                            const count = questionsInBucket(bucket).length;
+                            const isEmpty = count === 0;
+                            return (
+                              <div
+                                key={bucket}
+                                className={`flex items-center justify-between gap-2 px-3.5 py-2.5 ${idx !== 0 ? 'border-t border-[#e4e4e7]' : ''}`}
+                              >
+                                <div className="min-w-0">
+                                  <p className="text-xs font-bold text-zinc-900 truncate">{EXPORT_BUCKET_LABELS[bucket]}</p>
+                                  <p className="text-[11px] text-zinc-500">{count} question{count === 1 ? '' : 's'}</p>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    onClick={() => exportBucketAsJson(bucket)}
+                                    disabled={isEmpty}
+                                    title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as JSON`}
+                                    className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                                      isEmpty
+                                        ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                                        : 'bg-[#f2f2f3] text-zinc-600 border-[#e4e4e7] hover:bg-zinc-900 hover:text-white'
+                                    }`}
+                                  >
+                                    <FileText className="w-3 h-3" /> JSON
+                                  </button>
+                                  <button
+                                    onClick={() => exportBucketAsExcel(bucket)}
+                                    disabled={isEmpty}
+                                    title={`Download ${EXPORT_BUCKET_LABELS[bucket]} as Excel`}
+                                    className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                                      isEmpty
+                                        ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
+                                        : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-700 hover:text-white'
+                                    }`}
+                                  >
+                                    <FileSpreadsheet className="w-3 h-3" /> XLSX
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Contextual destructive "clear workspace" — visually separated
+                      from the primary/secondary export actions */}
+                  <button
+                    onClick={handleClearAllQuestions}
+                    title="Clear current workspace items (admin only)"
+                    className="inline-flex items-center justify-center gap-1.5 px-3 h-10 text-xs font-semibold rounded-lg border border-transparent text-rose-500 hover:text-rose-700 hover:bg-rose-50 hover:border-rose-200 transition-all cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Dynamic metrics card deck */}
             <StatsGrid
               stats={stats}
