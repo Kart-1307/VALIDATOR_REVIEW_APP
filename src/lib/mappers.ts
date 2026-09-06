@@ -97,6 +97,31 @@ export function isRawInDateRange(
   return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
 }
 
+// Assignment-state quick filter (All / Unclaimed / Claimed / My Questions),
+// shared by the Curator tab and the New Batch workspace so the "unclaimed"
+// definition stays a single source of truth.
+//
+//   - "unclaimed": no current claimant (`claimed_by`) AND no current assignee
+//     (`assigned_to`) — i.e. no one is working this question.
+//   - "claimed": a claimant exists (the self-serve claim that locks review).
+//   - "mine": the current user is either the claimant or the assignee.
+export type ClaimFilter = 'all' | 'unclaimed' | 'claimed' | 'mine';
+
+export function matchesClaimFilter(
+  q: { claimedBy?: string | null; assignedTo?: string | null },
+  claimFilter: ClaimFilter | undefined,
+  currentUserId?: string | null
+): boolean {
+  if (!claimFilter || claimFilter === 'all') return true;
+  if (claimFilter === 'unclaimed') return !q.claimedBy && !q.assignedTo;
+  if (claimFilter === 'claimed') return !!q.claimedBy;
+  if (claimFilter === 'mine') {
+    const uid = currentUserId;
+    return (!!q.claimedBy && q.claimedBy === uid) || (!!q.assignedTo && q.assignedTo === uid);
+  }
+  return true;
+}
+
 // Clean text for production JSON exports. Keep meaningful SAT content intact while
 // removing BOM/zero-width characters and normalizing line endings/Unicode form so
 // exported files do not contain hidden encoding artifacts. JSON.stringify emits

@@ -9,6 +9,14 @@ interface FiltersPanelProps {
   onResetAll: () => void;
   hasActiveFilters: boolean;
   validators?: { id: string; name: string; email: string }[];
+  currentUserId?: string | null;
+  claimCounts?: { total: number; unclaimed: number; claimed: number; mine: number };
+}
+
+interface ClaimOption {
+  key: NonNullable<FilterState['claimFilter']>;
+  label: string;
+  count: number;
 }
 
 export default function FiltersPanel({
@@ -18,13 +26,23 @@ export default function FiltersPanel({
   sections,
   onResetAll,
   hasActiveFilters,
-  validators = []
+  validators = [],
+  currentUserId = null,
+  claimCounts = { total: 0, unclaimed: 0, claimed: 0, mine: 0 }
 }: FiltersPanelProps) {
   
   const formatLabel = (val: string) => {
     if (!val) return 'All';
     return val.replace(/_/g, ' & ');
   };
+
+  const claimOptions: ClaimOption[] = [
+    { key: 'all', label: 'All', count: claimCounts.total },
+    { key: 'unclaimed', label: 'Unclaimed', count: claimCounts.unclaimed },
+    { key: 'claimed', label: 'Claimed', count: claimCounts.claimed },
+    { key: 'mine', label: 'My Questions', count: claimCounts.mine }
+  ];
+  const activeClaim = filters.claimFilter || 'all';
 
   return (
     <div className="bg-[#fafafa] border border-[#e4e4e7] rounded-xl p-5 mb-6 shadow-sm">
@@ -53,6 +71,42 @@ export default function FiltersPanel({
               Reset Filters
             </button>
           )}
+        </div>
+
+        {/* Assignment-state quick filter — a prominent segmented control so
+            curators can instantly isolate questions nobody has claimed yet. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {claimOptions.map(opt => {
+            const isActive = activeClaim === opt.key;
+            const disabled = opt.key === 'mine' && !currentUserId;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => onChangeFilters({ claimFilter: opt.key === 'all' ? 'all' : opt.key })}
+                disabled={disabled}
+                title={opt.key === 'unclaimed'
+                  ? 'Show only questions with no current claimant or assignee'
+                  : opt.key === 'claimed'
+                    ? 'Show only questions that are currently claimed'
+                    : opt.key === 'mine'
+                      ? 'Show only questions assigned to or claimed by you'
+                      : 'Show all questions regardless of assignment'}
+                aria-pressed={isActive}
+                className={`inline-flex items-center gap-1.5 px-3 h-9 text-xs font-semibold rounded-full border transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                  isActive
+                    ? opt.key === 'unclaimed'
+                      ? 'bg-indigo-600 border-indigo-600 text-white shadow-xs'
+                      : 'bg-[#6366f1] border-[#6366f1] text-white shadow-xs'
+                    : 'bg-white border-[#e4e4e7] text-zinc-600 hover:bg-[#f2f2f3] hover:text-zinc-900'
+                }`}
+              >
+                {opt.label}
+                <span className={`text-[11px] font-bold rounded-md px-1.5 py-0.5 ${isActive ? 'bg-white/25 text-white' : 'bg-[#e4e4e7] text-zinc-500'}`}>
+                  {opt.count}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         {/* Dropdowns row */}

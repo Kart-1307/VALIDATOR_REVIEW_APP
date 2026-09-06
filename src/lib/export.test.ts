@@ -5,7 +5,8 @@ import {
   buildProductionExportRecord,
   toLocalDateKey,
   isApprovedInDateRange,
-  isRawInDateRange
+  isRawInDateRange,
+  matchesClaimFilter
 } from './mappers';
 import type { SATQuestion } from '../types';
 
@@ -310,6 +311,44 @@ describe('isRawInDateRange (raw date-range filter)', () => {
     expect(isRawInDateRange(makeQuestion({ createdAt: null, updatedAt: null }), '2026-09-06', '2026-09-06')).toBe(false);
     expect(isRawInDateRange(createdOn('2026-09-06'), '', '2026-09-06')).toBe(false);
     expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-06', '')).toBe(false);
+  });
+});
+
+// --- Assignment-state (Unclaimed / Claimed / My Questions) filter -----------
+
+describe('matchesClaimFilter (assignment-state quick filter)', () => {
+  const q = (over: { claimedBy?: string | null; assignedTo?: string | null } = {}) => makeQuestion(over);
+
+  it('returns true for everything when claimFilter is "all" or unset', () => {
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1' }), 'all', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'all', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1' }), undefined, 'u-1')).toBe(true);
+  });
+
+  it('unclaimed: only questions with no claimant AND no assignee', () => {
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'unclaimed', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: null }), 'unclaimed', 'u-1')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-2' }), 'unclaimed', 'u-1')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: 'u-2' }), 'unclaimed', 'u-1')).toBe(false);
+  });
+
+  it('claimed: only questions that currently have a claimant', () => {
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1' }), 'claimed', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1' }), 'claimed', 'u-2')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-2' }), 'claimed', 'u-1')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'claimed', 'u-1')).toBe(false);
+  });
+
+  it('mine: matches either claimed by me or assigned to me', () => {
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: null }), 'mine', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1' }), 'mine', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: 'u-2', assignedTo: null }), 'mine', 'u-1')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1' }), 'mine', 'u-2')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'mine', 'u-1')).toBe(false);
+  });
+
+  it('a released/removed assignment (all fields null) reverts to unclaimed', () => {
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'unclaimed', 'u-1')).toBe(true);
   });
 });
 

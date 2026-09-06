@@ -8,7 +8,7 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange } from '../lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange, matchesClaimFilter } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -104,6 +104,7 @@ export default function NewBatchWorkspace({
     status: 'all',
     generatorRunId: '',
     assignedOrClaimedBy: '',
+    claimFilter: 'all',
     dateFrom: '',
     dateTo: ''
   });
@@ -810,6 +811,8 @@ export default function NewBatchWorkspace({
     else if (filters.status === 'needs_revision') statusMatch = q.reviewStatus === 'needs_revision';
     const runIdMatch = !filters.generatorRunId || (q.generatorRunId || '').toLowerCase().includes(filters.generatorRunId.toLowerCase());
     const assignedMatch = !filters.assignedOrClaimedBy || q.assignedTo === filters.assignedOrClaimedBy || q.claimedBy === filters.assignedOrClaimedBy;
+    // 7b. Assignment-state quick filter (All / Unclaimed / Claimed / My Questions)
+    const claimMatch = matchesClaimFilter(q, filters.claimFilter, session?.user.id);
     let dateMatch = true;
     if ((filters.dateFrom || filters.dateTo) && q.createdAt) {
       const created = new Date(q.createdAt).getTime();
@@ -819,8 +822,8 @@ export default function NewBatchWorkspace({
     let batchMatch = true;
     if (batchFilter === 'untagged') batchMatch = !q.batchUploadedAt;
     else if (batchFilter !== 'all') batchMatch = q.batchUploadedAt === batchFilter;
-    return searchMatch && sectionMatch && categoryMatch && difficultyMatch && statusMatch && runIdMatch && assignedMatch && dateMatch && batchMatch;
-  }), [questions, filters, batchFilter]);
+    return searchMatch && sectionMatch && categoryMatch && difficultyMatch && statusMatch && runIdMatch && assignedMatch && claimMatch && dateMatch && batchMatch;
+  }), [questions, filters, batchFilter, session?.user.id]);
 
   const difficultyRank: Record<string, number> = { easy: 0, medium: 1, hard: 2 };
   const sortedQuestions = useMemo(() => [...filteredQuestions].sort((a, b) => {
@@ -862,10 +865,25 @@ export default function NewBatchWorkspace({
 
   const reviewedCount = stats.approved + stats.rejected;
   const reviewProgressPct = stats.total === 0 ? 0 : Math.round((reviewedCount / stats.total) * 100);
-  const hasActiveFilters = !!(filters.search || filters.section || filters.category || filters.difficulty || filters.status !== 'all' || filters.generatorRunId || filters.assignedOrClaimedBy || filters.dateFrom || filters.dateTo);
+  const hasActiveFilters = !!(filters.search || filters.section || filters.category || filters.difficulty || filters.status !== 'all' || filters.generatorRunId || filters.assignedOrClaimedBy || (filters.claimFilter && filters.claimFilter !== 'all') || filters.dateFrom || filters.dateTo);
+
+  // Per-question assignment-state counts for the quick filter chips. Derived
+  // client-side from the already-loaded in-memory questions array (same O(n)
+  // pattern as the existing stats memo) — no extra DB query.
+  const claimCounts = useMemo(() => {
+    const uid = session?.user.id;
+    let total = 0, unclaimed = 0, claimed = 0, mine = 0;
+    for (const q of questions) {
+      total++;
+      if (matchesClaimFilter(q, 'unclaimed', uid)) unclaimed++;
+      if (matchesClaimFilter(q, 'claimed', uid)) claimed++;
+      if (matchesClaimFilter(q, 'mine', uid)) mine++;
+    }
+    return { total, unclaimed, claimed, mine };
+  }, [questions, session?.user.id]);
 
   const handleResetFilters = () => {
-    setFilters({ search: '', section: '', category: '', difficulty: '', status: 'all', generatorRunId: '', assignedOrClaimedBy: '', dateFrom: '', dateTo: '' });
+    setFilters({ search: '', section: '', category: '', difficulty: '', status: 'all', generatorRunId: '', assignedOrClaimedBy: '', claimFilter: 'all', dateFrom: '', dateTo: '' });
     showToast('All search and dropdown filters cleared.', 'info');
   };
 
@@ -1823,6 +1841,8 @@ export default function NewBatchWorkspace({
         onResetAll={handleResetFilters}
         hasActiveFilters={hasActiveFilters}
         validators={validators}
+        currentUserId={session?.user.id || null}
+        claimCounts={claimCounts}
       />
 
       {batchGroups.length > 0 && (
@@ -1961,7 +1981,12 @@ export default function NewBatchWorkspace({
               <div className="w-12 h-12 rounded-full bg-[#f2f2f3] border border-[#e4e4e7] flex items-center justify-center text-zinc-500 mb-3.5">
                 <Info className="w-5 h-5" />
               </div>
-              <h4 className="text-sm font-bold text-zinc-900">No questions match your filter query</h4>
+              <h4 className="text-sm font-bold text-zinc-900">{filters.claimFilter === 'unclaimed' ? 'No unclaimed questions' : 'No questions match your filter query'}</h4>
+              {filters.claimFilter === 'unclaimed' ? (
+                <p className="text-xs text-zinc-500 mt-1 max-w-sm mx-auto leading-relaxed">All available questions in this batch are currently claimed or assigned.</p>
+              ) : (
+                <p className="text-xs text-zinc-500 mt-1 max-w-sm mx-auto leading-relaxed">Try adjusting the filters, clearing your search input, or selecting another batch.</p>
+              )}
               <button onClick={handleResetFilters} className="mt-4 px-4 py-2 bg-[#6366f1] text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-all cursor-pointer border border-[#6366f1]">
                 Clear Active Filters
               </button>

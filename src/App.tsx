@@ -15,7 +15,7 @@ import ValidatorProgressModal from './components/ValidatorProgressModal';
 import Login from './components/Login';
 import UpdatePassword from './components/UpdatePassword';
 import { supabase, Profile } from './lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange } from './lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, matchesClaimFilter } from './lib/mappers';
 import { getConsensusResolution } from './lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -243,6 +243,7 @@ export default function App() {
     status: 'all',
     generatorRunId: '',
     assignedOrClaimedBy: '',
+    claimFilter: 'all',
     dateFrom: '',
     dateTo: ''
   });
@@ -1875,6 +1876,10 @@ export default function App() {
       q.assignedTo === filters.assignedOrClaimedBy ||
       q.claimedBy === filters.assignedOrClaimedBy;
 
+    // 7b. Assignment-state quick filter (All / Unclaimed / Claimed / My
+    // Questions). "Unclaimed" = no current claimant AND no current assignee.
+    const claimMatch = matchesClaimFilter(q, filters.claimFilter, session?.user.id);
+
     // 8. Date generated range (spec §3)
     let dateMatch = true;
     if ((filters.dateFrom || filters.dateTo) && q.createdAt) {
@@ -1883,8 +1888,8 @@ export default function App() {
       if (filters.dateTo) dateMatch = dateMatch && created <= new Date(filters.dateTo).getTime() + 86400000;
     }
 
-    return searchMatch && sectionMatch && categoryMatch && difficultyMatch && statusMatch && runIdMatch && assignedMatch && dateMatch;
-  }), [questions, filters]);
+    return searchMatch && sectionMatch && categoryMatch && difficultyMatch && statusMatch && runIdMatch && assignedMatch && claimMatch && dateMatch;
+  }), [questions, filters, session?.user.id]);
 
   // --- Sort control (spec §3: "Filter/sort by ... date generated ...") ---
   const difficultyRank: Record<string, number> = { easy: 0, medium: 1, hard: 2 };
@@ -1943,7 +1948,22 @@ export default function App() {
   const reviewedCount = stats.approved + stats.rejected;
   const reviewProgressPct = stats.total === 0 ? 0 : Math.round((reviewedCount / stats.total) * 100);
 
-  const hasActiveFilters = !!(filters.search || filters.section || filters.category || filters.difficulty || filters.status !== 'all' || filters.generatorRunId || filters.assignedOrClaimedBy || filters.dateFrom || filters.dateTo);
+  const hasActiveFilters = !!(filters.search || filters.section || filters.category || filters.difficulty || filters.status !== 'all' || filters.generatorRunId || filters.assignedOrClaimedBy || (filters.claimFilter && filters.claimFilter !== 'all') || filters.dateFrom || filters.dateTo);
+
+  // Per-question assignment-state counts for the quick filter chips. Derived
+  // client-side from the already-loaded in-memory questions array (same O(n)
+  // pattern as the existing stats memo) — no extra DB query.
+  const claimCounts = useMemo(() => {
+    const uid = session?.user.id;
+    let total = 0, unclaimed = 0, claimed = 0, mine = 0;
+    for (const q of questions) {
+      total++;
+      if (matchesClaimFilter(q, 'unclaimed', uid)) unclaimed++;
+      if (matchesClaimFilter(q, 'claimed', uid)) claimed++;
+      if (matchesClaimFilter(q, 'mine', uid)) mine++;
+    }
+    return { total, unclaimed, claimed, mine };
+  }, [questions, session?.user.id]);
 
   const handleResetFilters = () => {
     setFilters({
@@ -1954,6 +1974,7 @@ export default function App() {
       status: 'all',
       generatorRunId: '',
       assignedOrClaimedBy: '',
+      claimFilter: 'all',
       dateFrom: '',
       dateTo: ''
     });
@@ -2403,6 +2424,8 @@ export default function App() {
               onResetAll={handleResetFilters}
               hasActiveFilters={hasActiveFilters}
               validators={validators}
+              currentUserId={session?.user.id || null}
+              claimCounts={claimCounts}
             />
             {/* Undo Last Bulk Action — restores exactly the questions the last
                 bulk approve/reject touched, to exactly their prior state. */}
@@ -2569,9 +2592,11 @@ export default function App() {
                     <div className="w-12 h-12 rounded-full bg-[#f2f2f3] border border-[#e4e4e7] flex items-center justify-center text-zinc-500 mb-3.5">
                       <Info className="w-5 h-5" />
                     </div>
-                    <h4 className="text-sm font-bold text-zinc-900">No questions match your filter query</h4>
+                    <h4 className="text-sm font-bold text-zinc-900">{filters.claimFilter === 'unclaimed' ? 'No unclaimed questions' : 'No questions match your filter query'}</h4>
                     <p className="text-xs text-zinc-500 mt-1 max-w-sm mx-auto leading-relaxed">
-                      Try adjusting the difficulty level, clearing your search input, or selecting another section status metric.
+                      {filters.claimFilter === 'unclaimed'
+                        ? 'All available questions are currently claimed or assigned.'
+                        : 'Try adjusting the difficulty level, clearing your search input, or selecting another section status metric.'}
                     </p>
                     <button
                       onClick={handleResetFilters}

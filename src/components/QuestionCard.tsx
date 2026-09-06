@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion } from 'motion/react';
-import { Check, X, Edit3, HelpCircle, ChevronDown, ChevronUp, AlertCircle, RefreshCw, MessageSquare, Copy, ShieldCheck, ShieldAlert, Settings2, Lock, Unlock, History, RotateCcw, Calculator, Sparkles, ClipboardCopy, CheckCircle2 } from 'lucide-react';
+import { Check, X, Edit3, HelpCircle, ChevronDown, ChevronUp, AlertCircle, RefreshCw, MessageSquare, Copy, ShieldCheck, ShieldAlert, Settings2, Lock, Unlock, History, RotateCcw, Calculator, Sparkles, ClipboardCopy, CheckCircle2, Circle } from 'lucide-react';
 import { SATQuestion, MAX_CONSENSUS_REVIEWERS } from '../types';
 import { getConsensusResolution } from '../lib/consensus';
 import DesmosModal from './DesmosModal';
@@ -335,6 +335,7 @@ function QuestionCard({
   const isClaimed = !!question.claimedBy;
   const isClaimedByMe = isClaimed && question.claimedBy === currentUserId;
   const isLockedByOther = isClaimed && !isClaimedByMe;
+  const isUnclaimed = !isClaimed && !question.assignedTo;
 
   let borderStyle = 'border-[#e4e4e7]';
   let cardBg = 'bg-[#fafafa]';
@@ -466,6 +467,14 @@ function QuestionCard({
           {isPending && (
             <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-[#ececed] text-zinc-500 border border-[#e4e4e7] flex items-center gap-1 select-none">
               PENDING
+            </span>
+          )}
+          {isUnclaimed && (
+            <span
+              title="No user has claimed this question and it is not assigned — anyone can claim it."
+              className="text-[11px] font-semibold px-2 py-1 rounded-md bg-white text-indigo-500 border border-dashed border-indigo-300 flex items-center gap-1 select-none"
+            >
+              <Circle className="w-2.5 h-2.5 fill-current" /> UNCLAIMED
             </span>
           )}
         </div>

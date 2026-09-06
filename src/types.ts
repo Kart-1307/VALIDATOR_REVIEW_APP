@@ -148,6 +148,7 @@ export interface FilterState {
   status: 'all' | 'pending' | 'approved' | 'rejected' | 'needs_revision';
   generatorRunId?: string;
   assignedOrClaimedBy?: string; // profile id — matches either assignedTo or claimedBy
+  claimFilter?: 'all' | 'unclaimed' | 'claimed' | 'mine'; // assignment-state quick filter
   dateFrom?: string; // yyyy-mm-dd
   dateTo?: string; // yyyy-mm-dd
 }
