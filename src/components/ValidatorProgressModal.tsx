@@ -50,6 +50,14 @@ const isComment = (d: string) => /commented on item/i.test(d);
 // matched and silently fell through to the generic 'Edited' tag instead.
 const stripBatchPrefix = (d: string) => d.replace(/^\[New Batch\]\s*/, '');
 
+const parseBulkCount = (desc: string): number => {
+  const match =
+    desc.match(/\b(?:approved|rejected|merged|cleared|restored|exported)\s+(?:(?:filtered|manually\s+selected)\s+)?(\d+)/i) ||
+    desc.match(/\b(?:bulk\s+)?(?:approved|rejected|merged|cleared|restored|exported)\s+(\d+)/i) ||
+    desc.match(/\b(\d+)\s+(?:[a-z]+\s+)*(?:item|question)s?\b/i);
+  return match ? parseInt(match[1], 10) : 0;
+};
+
 // yyyy-mm-dd in India Standard Time (Asia/Kolkata) — matches AdminPanel.tsx timezone handling
 const toLocalDateKey = (d: Date | string) => {
   const dateObj = typeof d === 'string' ? new Date(d) : d;
@@ -152,10 +160,19 @@ export default function ValidatorProgressModal({
 
     const perQuestion = new Map<string, QuestionActivity>();
     let commentsAdded = 0;
+    let bulkApproved = 0;
+    let bulkRejected = 0;
 
     dayLogs.forEach(log => {
       const qid = log.questionId;
-      if (!qid) return;
+      if (!qid) {
+        const bCount = parseBulkCount(log.description);
+        if (bCount > 0) {
+          if (log.action === 'approve') bulkApproved += bCount;
+          else if (log.action === 'reject') bulkRejected += bCount;
+        }
+        return;
+      }
       if (!perQuestion.has(qid)) {
         perQuestion.set(qid, { questionId: qid, tags: new Set(), lastActionAt: log.timestamp });
       }
@@ -176,8 +193,8 @@ export default function ValidatorProgressModal({
     });
 
     const claimed = [...perQuestion.values()].filter(a => a.tags.has('Claimed')).length;
-    const approved = [...perQuestion.values()].filter(a => a.tags.has('Approved')).length;
-    const rejected = [...perQuestion.values()].filter(a => a.tags.has('Rejected')).length;
+    const approved = Math.max([...perQuestion.values()].filter(a => a.tags.has('Approved')).length, bulkApproved);
+    const rejected = Math.max([...perQuestion.values()].filter(a => a.tags.has('Rejected')).length, bulkRejected);
     const needsRevision = [...perQuestion.values()].filter(a => a.tags.has('Needs Revision')).length;
 
     return {

@@ -41,6 +41,15 @@ const isNeedsRevisionLog = (d: string) =>
 const isClaimLog = (d: string) => /claimed item ".*?" for review/i.test(d);
 const isCommentLog = (d: string) => /commented on item/i.test(d);
 
+// Helper: extract numeric bulk count from log description strings if present (e.g. "Bulk approved 33 filtered item(s)")
+const parseBulkCount = (desc: string): number => {
+  const match =
+    desc.match(/\b(?:approved|rejected|merged|cleared|restored|exported)\s+(?:(?:filtered|manually\s+selected)\s+)?(\d+)/i) ||
+    desc.match(/\b(?:bulk\s+)?(?:approved|rejected|merged|cleared|restored|exported)\s+(\d+)/i) ||
+    desc.match(/\b(\d+)\s+(?:[a-z]+\s+)*(?:item|question)s?\b/i);
+  return match ? parseInt(match[1], 10) : 0;
+};
+
 export default function AdminPanel({
   questions,
   logs,
@@ -190,7 +199,7 @@ export default function AdminPanel({
 
   // --- §9: throughput per validator per day (deduplicated by unique completed decision questions touched in IST) ---
   const dailyThroughput = useMemo(() => {
-    const dailyMap: Record<string, Record<string, { actions: number; questionIds: Set<string> }>> = {};
+    const dailyMap: Record<string, Record<string, { actions: number; questionIds: Set<string>; bulkCount: number }>> = {};
     effectiveLogs.forEach(l => {
       if (!l.rawTimestamp) return;
       const dateKey = toLocalDateKey(l.rawTimestamp);
@@ -199,12 +208,17 @@ export default function AdminPanel({
         dailyMap[dateKey] = {};
       }
       if (!dailyMap[dateKey][userKey]) {
-        dailyMap[dateKey][userKey] = { actions: 0, questionIds: new Set() };
+        dailyMap[dateKey][userKey] = { actions: 0, questionIds: new Set(), bulkCount: 0 };
       }
       dailyMap[dateKey][userKey].actions += 1;
       // Strict rule: ONLY count questions that have a completed decision (Approved, Rejected, or Needs Revision)
       if (l.questionId && isDecisionLog(l)) {
         dailyMap[dateKey][userKey].questionIds.add(l.questionId);
+      } else if (!l.questionId && isDecisionLog(l)) {
+        const bCount = parseBulkCount(l.description);
+        if (bCount > 0) {
+          dailyMap[dateKey][userKey].bulkCount += bCount;
+        }
       }
     });
 
@@ -216,7 +230,7 @@ export default function AdminPanel({
           date,
           displayDate,
           user,
-          uniqueQuestions: stats.questionIds.size,
+          uniqueQuestions: Math.max(stats.questionIds.size, stats.bulkCount),
           actions: stats.actions
         });
       });
@@ -229,6 +243,7 @@ export default function AdminPanel({
   const throughputSummary = useMemo(() => {
     const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
     const byValidatorQuestions: Record<string, Set<string>> = {};
+    const bulkByValidator: Record<string, number> = {};
     const actionsByValidator: Record<string, number> = {};
     effectiveLogs.forEach(l => {
       if (!l.rawTimestamp) return;
@@ -236,16 +251,22 @@ export default function AdminPanel({
       const key = getCanonicalUserName(l);
       if (!byValidatorQuestions[key]) {
         byValidatorQuestions[key] = new Set();
+        bulkByValidator[key] = 0;
         actionsByValidator[key] = 0;
       }
       actionsByValidator[key] += 1;
       // Strict rule: ONLY count questions that have a completed decision (Approved, Rejected, or Needs Revision)
       if (l.questionId && isDecisionLog(l)) {
         byValidatorQuestions[key].add(l.questionId);
+      } else if (!l.questionId && isDecisionLog(l)) {
+        const bCount = parseBulkCount(l.description);
+        if (bCount > 0) {
+          bulkByValidator[key] += bCount;
+        }
       }
     });
     return Object.keys(actionsByValidator).map(user => {
-      const count = byValidatorQuestions[user].size;
+      const count = Math.max(byValidatorQuestions[user].size, bulkByValidator[user]);
       return [user, count] as [string, number];
     }).sort((a, b) => b[1] - a[1]);
   }, [effectiveLogs, userCanonicalNameMap]);
@@ -392,14 +413,6 @@ export default function AdminPanel({
       return null;
     };
 
-    // Helper: extract numeric bulk count from log description strings if present (e.g. "Approved 116 items in bulk")
-    const parseBulkCount = (desc: string): number => {
-      const match = desc.match(/\b(?:approved|rejected|merged|cleared|restored|exported)\s+(\d+)\s+item/i) ||
-        desc.match(/\b(\d+)\s+item\(s\)/i) ||
-        desc.match(/\b(\d+)\s+question\(s\)/i);
-      return match ? parseInt(match[1], 10) : 0;
-    };
-
     // Group logs by questionId for overall day stats. Bulk approve/reject
     // actions log a single summary entry with no questionId (see
     // executeBulkConfirm), so they'd otherwise be silently dropped from every
@@ -523,8 +536,8 @@ export default function AdminPanel({
         else if (decision === 'needs_revision') vNeedsRevision++;
       });
 
-      vApproved += data.bulkApproved;
-      vRejected += data.bulkRejected;
+      vApproved = Math.max(vApproved, data.bulkApproved);
+      vRejected = Math.max(vRejected, data.bulkRejected);
 
       const decidedCount = vApproved + vRejected + vNeedsRevision;
       const uniqueQuestions = decidedCount > 0 ? decidedCount : data.questionLogs.size;
@@ -540,13 +553,16 @@ export default function AdminPanel({
     }).sort((a, b) => b.uniqueQuestions - a.uniqueQuestions || b.total - a.total);
 
     const totalEvaluatedDecisions = validatorRows.reduce((sum, r) => sum + r.uniqueQuestions, 0);
+    const sumApproved = validatorRows.reduce((sum, r) => sum + r.approved, 0);
+    const sumRejected = validatorRows.reduce((sum, r) => sum + r.rejected, 0);
+    const sumNeedsRevision = validatorRows.reduce((sum, r) => sum + r.needsRevision, 0);
 
     return {
       totalActions: dayLogs.length,
       uniqueQuestionsTotal: totalEvaluatedDecisions,
-      approved: overallApproved,
-      rejected: overallRejected,
-      needsRevision: overallNeedsRevision,
+      approved: Math.max(overallApproved, sumApproved),
+      rejected: Math.max(overallRejected, sumRejected),
+      needsRevision: Math.max(overallNeedsRevision, sumNeedsRevision),
       claimed,
       comments,
       newQuestions,
