@@ -8,7 +8,7 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange, matchesClaimFilter, isQuestionValidated, compareValidationTier } from '../lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange, matchesClaimFilter, isQuestionValidated } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -894,10 +894,6 @@ export default function NewBatchWorkspace({
 
   const difficultyRank: Record<string, number> = { easy: 0, medium: 1, hard: 2 };
   const sortedQuestions = useMemo(() => [...filteredQuestions].sort((a, b) => {
-    // Validated (all 4 checks answered) questions sink to the LAST position;
-    // the user-selected sort still applies within each validation tier.
-    const tierCmp = compareValidationTier(a, b);
-    if (tierCmp !== 0) return tierCmp;
     let cmp = 0;
     switch (sortField) {
       case 'dateGenerated':
