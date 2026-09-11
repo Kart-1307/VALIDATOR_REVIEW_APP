@@ -1025,45 +1025,41 @@ function QuestionCard({
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Validation verdict actions (spec §5):
-          "Approve for Test Bank" only appears when ALL FOUR checks are "Yes".
-          "Needs Revision" appears once ALL FOUR checks are answered (Yes or No).
-          A 0/4 → 3/4 checklist keeps both hidden, and the parent handlers also
-          refuse to submit while any check value is still missing. */}
-      {(checksAllTrue || checksDecided) && !isLockedByOther && !isAuditor &&
-        question.reviewStatus !== 'approved' && question.reviewStatus !== 'rejected' && (
-        <div className="flex gap-2">
-          {checksAllTrue && (
-            <button
-              disabled={actionSubmitting}
-              onClick={() => runValidationAction(() => onApprove(question.id))}
-              title="Approve this question for the test bank"
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl border transition-all ${actionSubmitting
-                  ? 'border-[#e4e4e7] bg-[#f2f2f3] text-zinc-400 cursor-not-allowed'
-                  : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer shadow-sm shadow-emerald-600/20'
-                }`}
-            >
-              <CheckCircle2 className="w-4 h-4" /> Approve for Test Bank
-            </button>
-          )}
-          {checksDecided && (
-            <button
-              disabled={actionSubmitting}
-              onClick={() => runValidationAction(() => onNeedsRevision(question.id))}
-              onDoubleClick={(e) => e.preventDefault()}
-              title={question.reviewStatus === 'needs_revision' ? 'Marked for revision — click to re-affirm and send it back' : 'Send this question back for revision'}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl border transition-all ${actionSubmitting
-                  ? 'border-[#e4e4e7] bg-[#f2f2f3] text-zinc-400 cursor-not-allowed'
-                  : 'border-amber-600 bg-amber-600 text-white hover:bg-amber-700 cursor-pointer shadow-sm shadow-amber-600/20'
-                }`}
-            >
-              <RotateCcw className="w-4 h-4" /> Needs Revision
-            </button>
-          )}
-        </div>
-      )}
+        {/* Validation verdict actions — placed directly inside the checklist box */}
+        {(checksAllTrue || checksDecided) && !isLockedByOther && !isAuditor &&
+          question.reviewStatus !== 'approved' && question.reviewStatus !== 'rejected' && (
+          <div className={`flex gap-2 border-t border-[#e4e4e7] px-4 py-3`}>
+            {checksAllTrue && (
+              <button
+                disabled={actionSubmitting}
+                onClick={() => runValidationAction(() => onApprove(question.id))}
+                title="Approve this question for the test bank"
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl border transition-all ${actionSubmitting
+                    ? 'border-[#e4e4e7] bg-[#f2f2f3] text-zinc-400 cursor-not-allowed'
+                    : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer shadow-sm shadow-emerald-600/20'
+                  }`}
+              >
+                <CheckCircle2 className="w-4 h-4" /> Approve for Test Bank
+              </button>
+            )}
+            {checksDecided && (
+              <button
+                disabled={actionSubmitting}
+                onClick={() => runValidationAction(() => onNeedsRevision(question.id))}
+                onDoubleClick={(e) => e.preventDefault()}
+                title={question.reviewStatus === 'needs_revision' ? 'Marked for revision — click to re-affirm and send it back' : 'Send this question back for revision'}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl border transition-all ${actionSubmitting
+                    ? 'border-[#e4e4e7] bg-[#f2f2f3] text-zinc-400 cursor-not-allowed'
+                    : 'border-amber-600 bg-amber-600 text-white hover:bg-amber-700 cursor-pointer shadow-sm shadow-amber-600/20'
+                  }`}
+              >
+                <RotateCcw className="w-4 h-4" /> Needs Revision
+              </button>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Required-comment prompt (spec §6): shown the moment a check is marked "No" */}
       {Object.keys(pendingFailures).length > 0 && (
