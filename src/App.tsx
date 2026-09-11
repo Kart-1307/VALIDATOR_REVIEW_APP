@@ -15,7 +15,7 @@ import ValidatorProgressModal from './components/ValidatorProgressModal';
 import Login from './components/Login';
 import UpdatePassword from './components/UpdatePassword';
 import { supabase, Profile } from './lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, matchesClaimFilter } from './lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, matchesClaimFilter, isQuestionValidated, compareValidationTier } from './lib/mappers';
 import { getConsensusResolution } from './lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -233,6 +233,9 @@ export default function App() {
   // still in flight per question id so the realtime handler can ignore
   // self-echoes until this client's own writes for that id are done.
   const pendingWritesRef = useRef<Map<string, number>>(new Map());
+  const toastTimerRef = useRef<number | null>(null);
+  const questionsRef = useRef<SATQuestion[]>(questions);
+  questionsRef.current = questions;
   const [activeTab, setActiveTab] = useState<'curator' | 'newbatch' | 'analytics' | 'audit' | 'admin'>('curator');
 
   const [filters, setFilters] = useState<FilterState>({
@@ -458,9 +461,9 @@ export default function App() {
               ...incoming,
               // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
               passage: incoming.passage ?? q.passage,
-              explanation: incoming.explanation || q.explanation,
+              explanation: incoming.explanation ?? q.explanation,
               stimulus: incoming.stimulus ?? q.stimulus,
-              question: incoming.question || q.question,
+              question: incoming.question ?? q.question,
               choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : q.choices,
             };
           });
@@ -495,7 +498,11 @@ export default function App() {
   // --- Toast Trigger Helper ---
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
-    setTimeout(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
       setToast(null);
     }, 4000);
   };
@@ -676,11 +683,36 @@ export default function App() {
   const handleApprove = (id: string) => {
     if (blockIfAuditor()) return;
     const question = questions.find(q => q.id === id);
-    if (question) snapshotQuestionBeforeChange(question, 'approve');
+    if (!question) return;
+    // All four validation checks must be answered before an approval can be
+    // submitted — this guards the API write as well as the disabled button.
+    if (!isQuestionValidated(question)) {
+      showToast('Complete all four validation checks before approving.', 'error');
+      return;
+    }
+    snapshotQuestionBeforeChange(question, 'approve');
     const updated = questions.map(q => q.id === id ? { ...q, reviewStatus: 'approved' as const } : q);
     saveQuestions(updated);
     showToast('Question item approved for test bank.', 'success');
-    logEvent('approve', `Approved item "${id}" for the test bank in "${question?.category || 'General'}"`, id);
+    logEvent('approve', `Approved item "${id}" for the test bank in "${question.category || 'General'}"`, id);
+  };
+
+  // --- Validation Actions (spec §5): explicit "send back for revision"
+  // decision, deliberately separate from auto-deriving needs_revision off a
+  // "No" check. Only clickable once all four checks have been answered. ---
+  const handleNeedsRevision = (id: string) => {
+    if (blockIfAuditor()) return;
+    const question = questions.find(q => q.id === id);
+    if (!question) return;
+    if (!isQuestionValidated(question)) {
+      showToast('Complete all four validation checks before marking for revision.', 'error');
+      return;
+    }
+    snapshotQuestionBeforeChange(question, 'needs_revision');
+    const updated = questions.map(q => q.id === id ? { ...q, reviewStatus: 'needs_revision' as const } : q);
+    saveQuestions(updated);
+    showToast(`Question sent back for revision${question.reviewStatus === 'needs_revision' ? ' (already in revision)' : ''}.`, 'info');
+    logEvent('note', `${validatorName} marked item "${id}" for revision in "${question.category || 'General'}"`, id);
   };
 
   const handleReject = (id: string) => {
@@ -713,6 +745,11 @@ export default function App() {
   const handleResetStatus = (id: string) => {
     if (blockIfAuditor()) return;
     const question = questions.find(q => q.id === id);
+    if (!question) return;
+    if (question.claimedBy && question.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`${question.claimedByName || 'Another validator'} currently has this item claimed.`, 'error');
+      return;
+    }
     if (question) snapshotQuestionBeforeChange(question, 'reset');
     const updated = questions.map(q => q.id === id ? {
       ...q,
@@ -789,7 +826,8 @@ export default function App() {
     if (!question || !newCategory) return;
     snapshotQuestionBeforeChange(question, 'category_override');
     const withOverride = { ...question, category: newCategory, categoryOverride: newCategory, categoryOk: true };
-    const derived = deriveOverallStatus(withOverride);
+    let derived = deriveOverallStatus(withOverride);
+    if (question.reviewStatus === 'approved' && derived === 'pending') derived = 'approved';
     const updated = questions.map(q => q.id === id ? { ...withOverride, reviewStatus: derived } : q);
     saveQuestions(updated);
     showToast(`Category reassigned to "${newCategory}".`, 'success');
@@ -803,7 +841,8 @@ export default function App() {
     if (!question) return;
     snapshotQuestionBeforeChange(question, 'difficulty_override');
     const withOverride = { ...question, difficulty: newDifficulty, difficultyOverride: newDifficulty, difficultyOk: true };
-    const derived = deriveOverallStatus(withOverride);
+    let derived = deriveOverallStatus(withOverride);
+    if (question.reviewStatus === 'approved' && derived === 'pending') derived = 'approved';
     const updated = questions.map(q => q.id === id ? { ...withOverride, reviewStatus: derived } : q);
     saveQuestions(updated);
     showToast(`Difficulty reassigned to "${newDifficulty}".`, 'success');
@@ -845,7 +884,8 @@ export default function App() {
     if (!question) return;
     snapshotQuestionBeforeChange(question, 'clear_override');
     const cleared = { ...question, statusOverride: null, statusOverrideJustification: undefined };
-    const derived = deriveOverallStatus(cleared);
+    let derived = deriveOverallStatus(cleared);
+    if (question.reviewStatus === 'approved' && derived === 'pending') derived = 'approved';
     const updated = questions.map(q => q.id === id ? { ...cleared, reviewStatus: derived } : q);
     saveQuestions(updated);
     showToast('Manual override cleared — status reverted to auto-derived value.', 'info');
@@ -942,6 +982,12 @@ export default function App() {
 
   const handleReleaseClaim = (id: string) => {
     if (blockIfAuditor()) return;
+    const question = questions.find(q => q.id === id);
+    if (!question) return;
+    if (question.claimedBy && question.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`Cannot release this claim — it belongs to ${question.claimedByName || 'another validator'}.`, 'error');
+      return;
+    }
     const updated = questions.map(q => q.id === id
       ? { ...q, claimedBy: null, claimedByName: null, claimedAt: null }
       : q
@@ -958,6 +1004,8 @@ export default function App() {
       return;
     }
     const target = validatorId ? validators.find(v => v.id === validatorId) : null;
+    const question = questions.find(q => q.id === id);
+    if (question) snapshotQuestionBeforeChange(question, 'assign');
     const updated = questions.map(q => q.id === id
       ? { ...q, assignedTo: validatorId, assignedToName: target?.name || null }
       : q
@@ -1026,7 +1074,6 @@ export default function App() {
     }
     const question = questions.find(q => q.id === id);
     if (!question) return;
-    snapshotQuestionBeforeChange(question, 'resolve_consensus');
 
     const { primaryVerdict, secondOpinionVerdict, secondOpinionApproved, secondOpinionNeedsRevision, hasDisagreement } =
       getConsensusResolution(question);
@@ -1035,6 +1082,7 @@ export default function App() {
       showToast('There is no active primary vs. second-opinion disagreement on this item.', 'error');
       return;
     }
+    snapshotQuestionBeforeChange(question, 'resolve_consensus');
 
     // hasDisagreement guarantees both verdicts are decisive ('approved' | 'needs_revision'),
     // never 'pending' — narrow explicitly so this matches statusOverride's type.
@@ -1065,12 +1113,23 @@ export default function App() {
   };
 
   const handleEditTrigger = (q: SATQuestion) => {
+    if (blockIfAuditor()) return;
+    if (q.claimedBy && q.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`${q.claimedByName || 'Another validator'} currently has this item claimed.`, 'error');
+      return;
+    }
     setSelectedEditQuestion(q);
     setIsEditModalOpen(true);
   };
 
   const handleSaveEditedQuestion = (updatedQuestion: SATQuestion) => {
     if (blockIfAuditor()) return;
+    const question = questions.find(q => q.id === updatedQuestion.id);
+    if (question && question.claimedBy && question.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`${question.claimedByName || 'Another validator'} currently has this item claimed.`, 'error');
+      return;
+    }
+    if (question) snapshotQuestionBeforeChange(question, 'edit');
     const updated = questions.map(q => q.id === updatedQuestion.id ? updatedQuestion : q);
     saveQuestions(updated);
     showToast('Question changes saved successfully.', 'success');
@@ -1251,7 +1310,7 @@ export default function App() {
   };
 
   const handleSelectAllVisible = () => {
-    setSelectedIds(new Set(filteredQuestions.map(q => q.id)));
+    setSelectedIds(new Set(paginatedQuestions.map(q => q.id)));
   };
 
   const handleClearSelection = () => {
@@ -1355,6 +1414,8 @@ export default function App() {
     validatorFeedback: q.validatorFeedback || q.validator_feedback || q.feedback || undefined,
     similarity_score: q.similarity_score,
     similar_question_id: q.similar_question_id,
+    questionType: q.questionType || (q.choices ? 'mcq' : 'grid_in'),
+    imageUrl: q.imageUrl || q.image_url || null,
     reviewerNote: q.reviewerNote || q.reviewer_note || undefined,
     // Spec §6: prefer an existing `comments` thread; otherwise migrate a legacy
     // single reviewerNote string into a one-entry thread so nothing is lost.
@@ -1432,7 +1493,7 @@ export default function App() {
     // unless a newly-loaded file contains the same id, in which case the newer
     // version (later file wins on collisions across files too) overrides it.
     const merged = new Map<string, SATQuestion>();
-    questions.forEach(q => merged.set(q.id, q));
+    questionsRef.current.forEach(q => merged.set(q.id, q));
 
     let incomingCount = 0;
     let updatedCount = 0;
@@ -1894,6 +1955,12 @@ export default function App() {
   // --- Sort control (spec §3: "Filter/sort by ... date generated ...") ---
   const difficultyRank: Record<string, number> = { easy: 0, medium: 1, hard: 2 };
   const sortedQuestions = useMemo(() => [...filteredQuestions].sort((a, b) => {
+    // Validated (all 4 checks answered) questions sink to the LAST position;
+    // pending/undecided items keep working front spots first. The user-selected
+    // sort still applies within each validation tier. (Requirement: a validated
+    // question moves to the end of the validator's list.)
+    const tierCmp = compareValidationTier(a, b);
+    if (tierCmp !== 0) return tierCmp;
     let cmp = 0;
     switch (sortField) {
       case 'dateGenerated':
@@ -1918,6 +1985,7 @@ export default function App() {
   const [pageSize, setPageSize] = useState(25);
   useEffect(() => {
     setCurrentPage(1);
+    setSelectedIds(new Set());
   }, [filters, questions.length]);
   const totalPages = Math.max(1, Math.ceil(filteredQuestions.length / pageSize));
   const pageSafe = Math.min(currentPage, totalPages);
@@ -1945,7 +2013,7 @@ export default function App() {
     return map;
   }, [logs]);
 
-  const reviewedCount = stats.approved + stats.rejected;
+  const reviewedCount = stats.approved + stats.rejected + stats.needsRevision;
   const reviewProgressPct = stats.total === 0 ? 0 : Math.round((reviewedCount / stats.total) * 100);
 
   const hasActiveFilters = !!(filters.search || filters.section || filters.category || filters.difficulty || filters.status !== 'all' || filters.generatorRunId || filters.assignedOrClaimedBy || (filters.claimFilter && filters.claimFilter !== 'all') || filters.dateFrom || filters.dateTo);
@@ -2618,6 +2686,7 @@ export default function App() {
                         }
                       }}
                       onApprove={handleApprove}
+                      onNeedsRevision={handleNeedsRevision}
                       onReject={handleReject}
                       onResetStatus={handleResetStatus}
                       onEdit={handleEditTrigger}
@@ -2674,7 +2743,7 @@ export default function App() {
                   <span>Rows per page</span>
                   <select
                     value={pageSize}
-                    onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
+                    onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); setSelectedIds(new Set()); }}
                     className="bg-[#fafafa] border border-[#e4e4e7] rounded-md px-2 py-1 text-zinc-600 focus:outline-none focus:ring-1 focus:ring-[#6366f1] cursor-pointer"
                   >
                     {[10, 25, 50, 100].map(n => <option key={n} value={n}>{n}</option>)}

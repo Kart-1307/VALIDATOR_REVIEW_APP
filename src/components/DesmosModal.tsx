@@ -18,6 +18,7 @@ declare global {
 
 interface DesmosCalculatorInstance {
   setExpression: (expr: { id?: string; latex: string }) => void;
+  resize: () => void;
   destroy: () => void;
 }
 
@@ -96,6 +97,11 @@ export default function DesmosModal({ open, onClose, initialExpressions = [], qu
         });
 
         setStatus('ready');
+        // The calculator was created while its container was still
+        // display:none (status flips to 'ready' after construction), so its
+        // initial dimensions were 0×0. Ask Desmos to re-measure once the
+        // container is actually visible.
+        requestAnimationFrame(() => calculator.resize());
       })
       .catch((err: Error) => {
         if (cancelled) return;

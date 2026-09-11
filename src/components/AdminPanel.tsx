@@ -440,7 +440,9 @@ export default function AdminPanel({
 
     const claimed = dayLogs.filter(l => isClaimLog(l.description)).length;
     const comments = dayLogs.filter(l => isCommentLog(l.description)).length;
-    const newQuestions = questions.filter(q => q.createdAt && toLocalDateKey(q.createdAt) === snapshotDate).length;
+    const newQuestions =
+      questions.filter(q => q.createdAt && toLocalDateKey(q.createdAt) === snapshotDate).length +
+      batch2Questions.filter(b2 => b2.created_at && toLocalDateKey(b2.created_at) === snapshotDate).length;
 
     // Per-validator breakdown: combine log evidence + direct question state (questions & batch2) + bulk counts
     const perValidatorLogs: Record<string, { total: number; questionLogs: Map<string, AuditLogEntry[]>; bulkApproved: number; bulkRejected: number }> = {};
@@ -470,7 +472,7 @@ export default function AdminPanel({
 
     // Also scan questions & batch2Questions for direct dataset matches for each validator today
     validators.forEach(val => {
-      const name = val.name || val.email;
+      const name = val.name || val.email || 'Unknown Validator';
       const nameLower = name.trim().toLowerCase();
 
       // Check main Curator pool
@@ -539,7 +541,11 @@ export default function AdminPanel({
       };
     }).sort((a, b) => b.uniqueQuestions - a.uniqueQuestions || b.total - a.total);
 
-    const totalEvaluatedDecisions = validatorRows.reduce((sum, r) => sum + r.uniqueQuestions, 0);
+    // "unique question(s) evaluated" must be deduplicated at the day level,
+    // not, as before, the sum of each validator's per-row unique counts —
+    // a question reviewed by two validators was counted twice.
+    const uniqueQuestionIdsToday = new Set(dayLogs.filter(l => l.questionId).map(l => l.questionId));
+    const totalEvaluatedDecisions = uniqueQuestionIdsToday.size + bulkApprovedOverall + bulkRejectedOverall;
 
     return {
       totalActions: dayLogs.length,

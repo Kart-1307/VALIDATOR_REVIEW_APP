@@ -147,7 +147,10 @@ export default function ValidatorProgressModal({
       if (!l.rawTimestamp || !isDateInRange(toLocalDateKey(new Date(l.rawTimestamp)))) return false;
       const userLower = (l.user || '').trim().toLowerCase();
       if (!userLower) return false;
-      return userLower === targetLower || targetLower.includes(userLower) || userLower.includes(targetLower);
+      // Exact-name match: the log's user_name is written from the validator's
+      // own profile name, so substring matching (e.g. "Rob" matching "Robert")
+      // could misattribute someone else's activity to this validator.
+      return userLower === targetLower;
     });
 
     const perQuestion = new Map<string, QuestionActivity>();

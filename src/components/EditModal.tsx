@@ -53,7 +53,9 @@ export default function EditModal({ question, isOpen, onClose, onSave }: EditMod
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (formData) {
-      onSave(formData);
+      // Grid-in questions have no A/B/C/D choices — persist a null choices
+      // map so they stay recognizable as grid-in on the way back out.
+      onSave(formData.questionType === 'grid_in' ? { ...formData, choices: null } : formData);
       onClose();
     }
   };
@@ -213,49 +215,64 @@ export default function EditModal({ question, isOpen, onClose, onSave }: EditMod
                 />
               </div>
 
-              {/* Multiple Choices */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
-                {(['A', 'B', 'C', 'D'] as const).map((key) => (
-                  <div key={key} className="flex flex-col gap-1.5">
-                    <label className="text-xs font-bold text-zinc-500 flex items-center gap-1.5">
-                      <span className="w-5 h-5 rounded-md bg-[#f2f2f3] text-zinc-600 flex items-center justify-center text-[11px] font-bold border border-[#e4e4e7]">
-                        {key}
-                      </span>
-                      <span>Option {key}</span>
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={formData.choices?.[key] || ''}
-                      onChange={(e) => handleChoiceChange(key, e.target.value)}
-                      className="block w-full px-3 py-2 border border-[#e4e4e7] rounded-lg text-sm bg-white text-zinc-900 focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1]"
-                    />
-                  </div>
-                ))}
-              </div>
+              {/* Multiple Choices — hidden for grid-in (no A/B/C/D options) */}
+              {formData.questionType !== 'grid_in' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
+                  {(['A', 'B', 'C', 'D'] as const).map((key) => (
+                    <div key={key} className="flex flex-col gap-1.5">
+                      <label className="text-xs font-bold text-zinc-500 flex items-center gap-1.5">
+                        <span className="w-5 h-5 rounded-md bg-[#f2f2f3] text-zinc-600 flex items-center justify-center text-[11px] font-bold border border-[#e4e4e7]">
+                          {key}
+                        </span>
+                        <span>Option {key}</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={formData.choices?.[key] || ''}
+                        onChange={(e) => handleChoiceChange(key, e.target.value)}
+                        className="block w-full px-3 py-2 border border-[#e4e4e7] rounded-lg text-sm bg-white text-zinc-900 focus:outline-none focus:ring-1 focus:ring-[#6366f1] focus:border-[#6366f1]"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Answer Keys */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-2">
-                <div className="flex flex-col gap-1.5 sm:col-span-1">
+                <div className={`flex flex-col gap-1.5 ${formData.questionType === 'grid_in' ? 'sm:col-span-3' : 'sm:col-span-1'}`}>
                   <label className="text-xs font-bold text-zinc-500">Correct Answer</label>
-                  <select
-                    value={formData.correct_answer}
-                    onChange={(e) => handleTextChange('correct_answer', e.target.value)}
-                    className="block w-full px-3 py-2 border border-[#e4e4e7] rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 text-emerald-600 font-bold"
-                  >
-                    <option value="A" className="bg-white">A</option>
-                    <option value="B" className="bg-white">B</option>
-                    <option value="C" className="bg-white">C</option>
-                    <option value="D" className="bg-white">D</option>
-                  </select>
+                  {formData.questionType === 'grid_in' ? (
+                    <input
+                      type="text"
+                      required
+                      value={formData.correct_answer}
+                      onChange={(e) => handleTextChange('correct_answer', e.target.value)}
+                      placeholder="Enter the numeric answer, e.g. 42 or 1/4"
+                      className="block w-full px-3 py-2 border border-[#e4e4e7] rounded-lg text-sm bg-white text-emerald-600 font-bold focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  ) : (
+                    <select
+                      value={formData.correct_answer}
+                      onChange={(e) => handleTextChange('correct_answer', e.target.value)}
+                      className="block w-full px-3 py-2 border border-[#e4e4e7] rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 text-emerald-600 font-bold"
+                    >
+                      <option value="A" className="bg-white">A</option>
+                      <option value="B" className="bg-white">B</option>
+                      <option value="C" className="bg-white">C</option>
+                      <option value="D" className="bg-white">D</option>
+                    </select>
+                  )}
                 </div>
 
-                <div className="flex flex-col gap-1.5 sm:col-span-2 bg-[#f2f2f3] border border-[#e4e4e7] rounded-xl p-2 text-[12px] text-zinc-500 leading-normal flex-row items-center gap-2">
-                  <AlertCircle className="w-5 h-5 text-zinc-500 shrink-0" />
-                  <span>
-                    Ensure that the correct answer corresponds exactly to the option letter selected on the left.
-                  </span>
-                </div>
+                {formData.questionType !== 'grid_in' && (
+                  <div className="flex flex-col gap-1.5 sm:col-span-2 bg-[#f2f2f3] border border-[#e4e4e7] rounded-xl p-2 text-[12px] text-zinc-500 leading-normal flex-row items-center gap-2">
+                    <AlertCircle className="w-5 h-5 text-zinc-500 shrink-0" />
+                    <span>
+                      Ensure that the correct answer corresponds exactly to the option letter selected on the left.
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Explanation Text */}

@@ -78,6 +78,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
       total: number;
       approved: number;
       rejected: number;
+      needsRevision: number;
       pending: number;
       claimedPending: number;
       subdomains: Record<string, {
@@ -85,6 +86,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
         total: number;
         approved: number;
         rejected: number;
+        needsRevision: number;
         pending: number;
         claimedPending: number;
       }>;
@@ -108,6 +110,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
           total: 0,
           approved: 0,
           rejected: 0,
+          needsRevision: 0,
           pending: 0,
           claimedPending: 0,
           subdomains: {}
@@ -125,6 +128,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
 
       if (status === 'approved') dData.approved++;
       else if (status === 'rejected') dData.rejected++;
+      else if (status === 'needs_revision') dData.needsRevision++;
       else dData.pending++;
       if (isClaimedPending) dData.claimedPending++;
 
@@ -134,6 +138,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
           total: 0,
           approved: 0,
           rejected: 0,
+          needsRevision: 0,
           pending: 0,
           claimedPending: 0
         };
@@ -143,6 +148,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
       sData.total++;
       if (status === 'approved') sData.approved++;
       else if (status === 'rejected') sData.rejected++;
+      else if (status === 'needs_revision') sData.needsRevision++;
       else sData.pending++;
       if (isClaimedPending) sData.claimedPending++;
     });
@@ -395,7 +401,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
             </button>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
             <div className="bg-white border border-[#e4e4e7] rounded-lg p-3 text-center">
               <p className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Total</p>
               <p className="text-lg font-extrabold text-zinc-900 font-mono">{selectedSubdomainData.total}</p>
@@ -403,6 +409,10 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
             <div className="bg-white border border-emerald-200 rounded-lg p-3 text-center">
               <p className="text-[10px] uppercase font-bold text-emerald-600 tracking-wider">Approved</p>
               <p className="text-lg font-extrabold text-emerald-600 font-mono">{selectedSubdomainData.approved}</p>
+            </div>
+            <div className="bg-white border border-amber-200 rounded-lg p-3 text-center">
+              <p className="text-[10px] uppercase font-bold text-amber-700 tracking-wider">Needs Revision</p>
+              <p className="text-lg font-extrabold text-amber-700 font-mono">{selectedSubdomainData.needsRevision}</p>
             </div>
             <div className="bg-white border border-[#e4e4e7] rounded-lg p-3 text-center">
               <p className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Pending</p>
@@ -469,10 +479,15 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
                         className="h-full bg-emerald-500" 
                         title={`Approved: ${domain.approved}`}
                       />
-                      <div 
+                      <div
                         style={{ width: `${getPercentage(domain.pending, domain.total)}%` }} 
                         className="h-full bg-zinc-600" 
                         title={`Pending: ${domain.pending}`}
+                      />
+                      <div 
+                        style={{ width: `${getPercentage(domain.needsRevision, domain.total)}%` }} 
+                        className="h-full bg-amber-500" 
+                        title={`Needs Revision: ${domain.needsRevision}`}
                       />
                       <div 
                         style={{ width: `${getPercentage(domain.rejected, domain.total)}%` }} 
@@ -483,6 +498,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
                     <div className="flex justify-between text-[11px] font-mono font-bold text-zinc-500">
                       <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> Approved ({domain.approved})</span>
                       <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-zinc-600" /> Pending ({domain.pending})</span>
+                      <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Needs Revision ({domain.needsRevision})</span>
                       <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-rose-500" /> Rejected ({domain.rejected})</span>
                     </div>
                     {domain.claimedPending > 0 && (
@@ -499,7 +515,7 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
 
                   {/* Sub-domain items loop */}
                   <div className="space-y-2 border border-[#e4e4e7] rounded-lg p-2 max-h-[220px] overflow-y-auto bg-white">
-                    {(Object.values(domain.subdomains) as Array<{ name: string; total: number; approved: number; rejected: number; pending: number; claimedPending: number; }>).map((sub) => {
+                    {(Object.values(domain.subdomains) as Array<{ name: string; total: number; approved: number; rejected: number; needsRevision: number; pending: number; claimedPending: number; }>).map((sub) => {
                       const subProgress = getPercentage(sub.approved, sub.total);
                       const isHighlighted = selectedDomain !== 'all' && selectedSubdomain === sub.name;
                       return (
@@ -519,6 +535,12 @@ export default function DomainAnalytics({ questions, onSelectSubdomainFilter }: 
                               <span>{sub.total} questions</span>
                               <span>•</span>
                               <span className="text-emerald-600">{sub.approved} approved</span>
+                              {sub.needsRevision > 0 && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-amber-700">{sub.needsRevision} needs revision</span>
+                                </>
+                              )}
                               {sub.claimedPending > 0 && (
                                 <>
                                   <span>•</span>

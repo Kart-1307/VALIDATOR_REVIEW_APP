@@ -108,7 +108,7 @@ export function isRawInDateRange(
 export type ClaimFilter = 'all' | 'unclaimed' | 'claimed' | 'mine';
 
 export function matchesClaimFilter(
-  q: { claimedBy?: string | null; assignedTo?: string | null },
+  q: { claimedBy?: string | null; assignedTo?: string | null; reviewStatus?: string | null },
   claimFilter: ClaimFilter | undefined,
   currentUserId?: string | null
 ): boolean {
@@ -117,9 +117,47 @@ export function matchesClaimFilter(
   if (claimFilter === 'claimed') return !!q.claimedBy;
   if (claimFilter === 'mine') {
     const uid = currentUserId;
-    return (!!q.claimedBy && q.claimedBy === uid) || (!!q.assignedTo && q.assignedTo === uid);
+    const assignedToMe = (!!q.claimedBy && q.claimedBy === uid) || (!!q.assignedTo && q.assignedTo === uid);
+    // "My Questions" is the validator's active working queue. Once an item is
+    // approved it leaves the queue entirely, so it must not resurface on a
+    // re-query of this filter either (requirement: approved questions disappear
+    // from My Questions, not just from the current screen).
+    if (!assignedToMe) return false;
+    return q.reviewStatus !== 'approved';
   }
   return true;
+}
+
+// A question is "validated" once all four independent validation checks have
+// been answered — Yes or No. Null/undefined means that check is still pending,
+// so the item has not been fully reviewed yet. Shared by the Curator tab and
+// the New Batch workspace so "validated" means exactly one thing.
+export function isQuestionValidated(q: {
+  formationOk?: boolean | null;
+  answerOk?: boolean | null;
+  categoryOk?: boolean | null;
+  difficultyOk?: boolean | null;
+}): boolean {
+  return (
+    typeof q.formationOk === 'boolean' &&
+    typeof q.answerOk === 'boolean' &&
+    typeof q.categoryOk === 'boolean' &&
+    typeof q.difficultyOk === 'boolean'
+  );
+}
+
+// Primary comparator key for every question list: validated questions sink to
+// the LAST position while anything still pending/undecided keeps its normal
+// spot. Returns <0 when a should sort before b, >0 when b should sort first,
+// and 0 when both are in the same validation tier (the caller's own
+// sortField/sortDir then decides within each tier). This mirrors the
+// requirement precisely — a validated question moves to the end of the
+// list rather than staying where it was.
+export function compareValidationTier(
+  a: Parameters<typeof isQuestionValidated>[0],
+  b: Parameters<typeof isQuestionValidated>[0]
+): number {
+  return (isQuestionValidated(a) ? 1 : 0) - (isQuestionValidated(b) ? 1 : 0);
 }
 
 // Clean text for production JSON exports. Keep meaningful SAT content intact while

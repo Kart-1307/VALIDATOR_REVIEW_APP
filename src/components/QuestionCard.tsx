@@ -45,6 +45,7 @@ function getSectionLabel(sect?: string, section?: string) {
 interface QuestionCardProps {
   question: SATQuestion;
   onApprove: (id: string) => void;
+  onNeedsRevision: (id: string) => void;
   onReject: (id: string) => void;
   onResetStatus: (id: string) => void;
   onEdit: (question: SATQuestion) => void;
@@ -93,6 +94,7 @@ interface QuestionCardProps {
 function QuestionCard({
   question,
   onApprove,
+  onNeedsRevision,
   onReject,
   onResetStatus,
   onEdit,
@@ -123,6 +125,10 @@ function QuestionCard({
   const [isExpOpen, setIsExpOpen] = useState(true);
   const [newCommentDraft, setNewCommentDraft] = useState('');
   const [isAuditOpen, setIsAuditOpen] = useState(false);
+  // Prevents a rapid double-click on Approve / Needs Revision from firing the
+  // action twice (each click snapshots + writes + logs). Re-enabled shortly
+  // after the optimistic write is dispatched.
+  const [actionSubmitting, setActionSubmitting] = useState(false);
 
   // --- Enhancement §1/§2/§3: Math-only tools (Desmos calculator, Desmos-style
   // step-by-step solution, distractor quality assistant) ---
@@ -337,6 +343,22 @@ function QuestionCard({
   const isLockedByOther = isClaimed && !isClaimedByMe;
   const isUnclaimed = !isClaimed && !question.assignedTo;
 
+  // --- Validation completeness (spec §5): Approve / Needs Revision stay
+  // unavailable until the full 4-check rubric has been answered. ---
+  const validationChecks = useMemo<Array<boolean | null | undefined>>(
+    () => [question.formationOk, question.answerOk, question.categoryOk, question.difficultyOk],
+    [question.formationOk, question.answerOk, question.categoryOk, question.difficultyOk]
+  );
+  const checksDecided = validationChecks.every(c => typeof c === 'boolean');
+  const checksAllTrue = validationChecks.every(c => c === true);
+
+  const runValidationAction = (action: () => void) => {
+    if (actionSubmitting) return;
+    setActionSubmitting(true);
+    action();
+    window.setTimeout(() => setActionSubmitting(false), 700);
+  };
+
   let borderStyle = 'border-[#e4e4e7]';
   let cardBg = 'bg-[#fafafa]';
 
@@ -372,10 +394,10 @@ function QuestionCard({
         Yes
       </button>
       <button
-        onClick={() => ((value === false || isPendingNo) && onReset ? onReset() : onNo())}
-        disabled={isAuditor}
-        title={isAuditor ? 'Auditors have read-only access' : ((value === false || isPendingNo) && onReset ? 'Click to undo' : 'Mark as incorrect')}
-        className={`px-2.5 py-1 text-[12px] font-bold rounded-md border transition-all ${isAuditor ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} ${value === false || isPendingNo
+        onClick={() => (value === true ? undefined : ((value === false || isPendingNo) && onReset ? onReset() : onNo()))}
+        disabled={isAuditor || value === true}
+        title={isAuditor ? 'Auditors have read-only access' : (value === true ? 'Clear the "Yes" first to mark it incorrect' : ((value === false || isPendingNo) && onReset ? 'Click to undo' : 'Mark as incorrect'))}
+        className={`px-2.5 py-1 text-[12px] font-bold rounded-md border transition-all ${isAuditor || value === true ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} ${value === false || isPendingNo
             ? 'bg-rose-600 text-white border-rose-600'
             : 'text-zinc-500 border-[#e4e4e7] bg-white hover:bg-rose-50 hover:text-rose-600 hover:border-rose-200'
           }`}
@@ -488,10 +510,8 @@ function QuestionCard({
             : 'bg-[#fafafa] border-[#e4e4e7] text-zinc-500'
         }`}>
         <span className="flex items-center gap-1.5 font-medium">
-          {isLockedByOther ? (
-            <><Lock className="w-3.5 h-3.5" /> Claimed by {question.claimedByName || 'another validator'} — review is locked to avoid duplicate work</>
-          ) : isClaimedByMe ? (
-            <><Unlock className="w-3.5 h-3.5" /> You've claimed this item for review</>
+          {isClaimed ? (
+            <><Lock className="w-3.5 h-3.5" /> Claimed by: {question.claimedByName || (isClaimedByMe ? 'You' : 'another validator')} — {isClaimedByMe ? "you've claimed this item for review" : 'review is locked to avoid duplicate work'}</>
           ) : (
             <><Unlock className="w-3.5 h-3.5" /> Unclaimed — anyone can claim this to start reviewing</>
           )}
@@ -681,6 +701,18 @@ function QuestionCard({
 
       {/* Distractor-quality assistant (Enhancement §3) */}
       {isMath && isDistractorPanelOpen && !isAuditor && (() => {
+        if (!question.choices) {
+          return (
+            <div className="border border-[#e4e4e7] rounded-xl overflow-hidden bg-[#f2f2f3]">
+              <div className="px-4 py-2.5 bg-[#fafafa] border-b border-[#e4e4e7] text-xs font-bold text-zinc-600 uppercase tracking-wide flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> Distractor Quality Check
+              </div>
+              <div className="p-4 text-xs text-zinc-500">
+                This is a grid-in question — there are no A/B/C/D choices to analyze.
+              </div>
+            </div>
+          );
+        }
         const analysis = analyzeDistractors(question);
         const suggestions = suggestDistractors(question);
         const flagged = analysis.filter(a => a.flaw !== 'ok');
@@ -713,7 +745,9 @@ function QuestionCard({
                       </div>
                       <button
                         onClick={() => {
-                          navigator.clipboard?.writeText(s.value)
+                          const copied = navigator.clipboard?.writeText(s.value);
+                          if (!copied) return; // Clipboard API unavailable — nothing to chain on.
+                          copied
                             .then(() => {
                               setCopiedDistractor(s.value + i);
                               setTimeout(() => setCopiedDistractor(null), 1500);
@@ -870,13 +904,10 @@ function QuestionCard({
       {/* Validation Actions checklist (spec §5) — 4 independent checks, no blanket approve */}
       <div
         className={`border border-[#e4e4e7] rounded-xl overflow-hidden bg-[#f2f2f3] select-none ${(isLockedByOther || isAuditor) ? 'opacity-50 pointer-events-none' : ''}`}
-        title={isLockedByOther ? `Locked — claimed by ${question.claimedByName || 'another validator'}` : isAuditor ? 'Auditors have read-only access' : undefined}
+        title={isLockedByOther ? `Locked — Claimed by: ${question.claimedByName || 'another validator'}` : isAuditor ? 'Auditors have read-only access' : undefined}
       >
         <div className="flex items-center gap-1.5 px-4 py-2.5 bg-[#fafafa] border-b border-[#e4e4e7] text-xs font-bold text-zinc-500 uppercase tracking-wide">
           <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" /> Validation Checklist
-          <span className="normal-case font-medium text-[11px] text-zinc-600 ml-1">
-            (a "No" on any check sends this to Needs Revision; four "Yes" checks unlock Approve below)
-          </span>
         </div>
 
         <div className="flex flex-col divide-y divide-[#e4e4e7]">
@@ -996,17 +1027,37 @@ function QuestionCard({
         </div>
       </div>
 
-      {/* Approve action (spec §5): all four checks passing only unlocks this button —
-          it never fires on its own. Approval itself is a separate, deliberate click. */}
-      {question.formationOk === true && question.answerOk === true &&
-        question.categoryOk === true && question.difficultyOk === true &&
-        question.reviewStatus !== 'approved' && !isLockedByOther && !isAuditor && (
-        <button
-          onClick={() => onApprove(question.id)}
-          className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold rounded-xl border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 transition-all cursor-pointer"
-        >
-          <CheckCircle2 className="w-4 h-4" /> Approve for Test Bank
-        </button>
+      {/* Validation verdict actions (spec §5): both Approve and Needs Revision
+          only become available once ALL FOUR checks are answered (4/4, Yes or No).
+          A 0/4 → 3/4 checklist keeps both disabled, and the parent handlers also
+          refuse to submit while any check value is still missing. */}
+      {checksDecided && !isLockedByOther && !isAuditor &&
+        question.reviewStatus !== 'approved' && question.reviewStatus !== 'rejected' && (
+        <div className="flex gap-2">
+          <button
+            disabled={actionSubmitting || !checksAllTrue}
+            onClick={() => runValidationAction(() => onApprove(question.id))}
+            title={checksAllTrue ? 'Approve this question for the test bank' : 'All four checks must be answered "Yes" before this question can be approved'}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl border transition-all ${actionSubmitting || !checksAllTrue
+                ? 'border-[#e4e4e7] bg-[#f2f2f3] text-zinc-400 cursor-not-allowed'
+                : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer shadow-sm shadow-emerald-600/20'
+              }`}
+          >
+            <CheckCircle2 className="w-4 h-4" /> Approve for Test Bank
+          </button>
+          <button
+            disabled={actionSubmitting}
+            onClick={() => runValidationAction(() => onNeedsRevision(question.id))}
+            onDoubleClick={(e) => e.preventDefault()}
+            title={question.reviewStatus === 'needs_revision' ? 'Marked for revision — click to re-affirm and send it back' : 'Send this question back for revision'}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl border transition-all ${actionSubmitting
+                ? 'border-[#e4e4e7] bg-[#f2f2f3] text-zinc-400 cursor-not-allowed'
+                : 'border-amber-600 bg-amber-600 text-white hover:bg-amber-700 cursor-pointer shadow-sm shadow-amber-600/20'
+              }`}
+          >
+            <RotateCcw className="w-4 h-4" /> Needs Revision
+          </button>
+        </div>
       )}
 
       {/* Required-comment prompt (spec §6): shown the moment a check is marked "No" */}
@@ -1319,8 +1370,9 @@ function QuestionCard({
         )}
       </div>
 
-      {/* Footer: quick edit + reset — hidden entirely for read-only auditors */}
-      {!isAuditor && (
+      {/* Footer: quick edit + reset — hidden entirely for read-only auditors,
+          and for non-admins while another validator holds the claim lock. */}
+      {!isAuditor && (!isLockedByOther || isAdmin) && (
         <div className="flex flex-wrap justify-between items-center gap-3 pt-2 select-none">
           <button
             onClick={() => onEdit(question)}

@@ -6,8 +6,13 @@ import {
   toLocalDateKey,
   isApprovedInDateRange,
   isRawInDateRange,
-  matchesClaimFilter
+  matchesClaimFilter,
+  isQuestionValidated,
+  compareValidationTier,
+  rowToQuestion,
+  QuestionRow
 } from './mappers';
+import { deriveChecksVerdict, getConsensusResolution } from './consensus';
 import type { SATQuestion } from '../types';
 
 // --- Helpers ---------------------------------------------------------------
@@ -317,7 +322,7 @@ describe('isRawInDateRange (raw date-range filter)', () => {
 // --- Assignment-state (Unclaimed / Claimed / My Questions) filter -----------
 
 describe('matchesClaimFilter (assignment-state quick filter)', () => {
-  const q = (over: { claimedBy?: string | null; assignedTo?: string | null } = {}) => makeQuestion(over);
+  const q = (over: { claimedBy?: string | null; assignedTo?: string | null; reviewStatus?: SATQuestion['reviewStatus'] } = {}) => makeQuestion(over);
 
   it('returns true for everything when claimFilter is "all" or unset', () => {
     expect(matchesClaimFilter(q({ claimedBy: 'u-1' }), 'all', 'u-1')).toBe(true);
@@ -339,16 +344,191 @@ describe('matchesClaimFilter (assignment-state quick filter)', () => {
     expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'claimed', 'u-1')).toBe(false);
   });
 
-  it('mine: matches either claimed by me or assigned to me', () => {
-    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: null }), 'mine', 'u-1')).toBe(true);
-    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1' }), 'mine', 'u-1')).toBe(true);
-    expect(matchesClaimFilter(q({ claimedBy: 'u-2', assignedTo: null }), 'mine', 'u-1')).toBe(false);
-    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1' }), 'mine', 'u-2')).toBe(false);
-    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'mine', 'u-1')).toBe(false);
+  it('mine: matches either claimed by me or assigned to me (while not approved)', () => {
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: null, reviewStatus: 'pending' }), 'mine', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1', reviewStatus: 'pending' }), 'mine', 'u-1')).toBe(true);
+    expect(matchesClaimFilter(q({ claimedBy: 'u-2', assignedTo: null, reviewStatus: 'pending' }), 'mine', 'u-1')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1', reviewStatus: 'pending' }), 'mine', 'u-2')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null, reviewStatus: 'pending' }), 'mine', 'u-1')).toBe(false);
+  });
+
+  it('mine: an approved question leaves the active queue and is not returned on refetch', () => {
+    // Requirement: approved questions must disappear from "My Questions". This
+    // is enforced at the filter/backend layer (not just hidden client-side), so
+    // a later re-query of the filter never resurfaces an item I already approved.
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: null, reviewStatus: 'approved' }), 'mine', 'u-1')).toBe(false);
+    expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: 'u-1', reviewStatus: 'approved' }), 'mine', 'u-1')).toBe(false);
+    // Needs-revision items are still active work and must keep showing up.
+    expect(matchesClaimFilter(q({ claimedBy: 'u-1', assignedTo: null, reviewStatus: 'needs_revision' }), 'mine', 'u-1')).toBe(true);
   });
 
   it('a released/removed assignment (all fields null) reverts to unclaimed', () => {
     expect(matchesClaimFilter(q({ claimedBy: null, assignedTo: null }), 'unclaimed', 'u-1')).toBe(true);
+  });
+});
+
+// --- 5. Validation gating (4/4 checklist) and "validated -> last" ordering ---
+
+describe('isQuestionValidated (all four checks answered)', () => {
+  it('is false until every check is an explicit Yes/No', () => {
+    expect(isQuestionValidated({})).toBe(false);
+    expect(isQuestionValidated({ formationOk: true, answerOk: true, categoryOk: true })).toBe(false);
+    expect(isQuestionValidated({ formationOk: null, answerOk: true, categoryOk: true, difficultyOk: true })).toBe(false);
+    expect(isQuestionValidated({ formationOk: true, answerOk: undefined, categoryOk: true, difficultyOk: true })).toBe(false);
+  });
+
+  it('is true once all four are explicit booleans — even a failing checklist counts as validated', () => {
+    expect(isQuestionValidated({ formationOk: true, answerOk: true, categoryOk: true, difficultyOk: true })).toBe(true);
+    expect(isQuestionValidated({ formationOk: true, answerOk: false, categoryOk: true, difficultyOk: false })).toBe(true);
+  });
+
+  it('does not treat non-boolean leftovers as decided (defeats DB/lag surprises)', () => {
+    expect(isQuestionValidated({ formationOk: 'true' as unknown as boolean, answerOk: true, categoryOk: true, difficultyOk: true })).toBe(false);
+  });
+});
+
+describe('compareValidationTier (validated questions move to the last position)', () => {
+  const pending = { formationOk: null, answerOk: null, categoryOk: null, difficultyOk: null };
+  const validatedFalse = { formationOk: false, answerOk: true, categoryOk: true, difficultyOk: true };
+  const validatedTrue = { formationOk: true, answerOk: true, categoryOk: true, difficultyOk: true };
+
+  it('pending items sort strictly before validated items', () => {
+    expect(compareValidationTier(pending, validatedTrue)).toBeLessThan(0);
+    expect(compareValidationTier(validatedTrue, pending)).toBeGreaterThan(0);
+    expect(compareValidationTier(pending, pending)).toBe(0);
+    expect(compareValidationTier(validatedTrue, validatedTrue)).toBe(0);
+    // A "validated but failing" checklist is still validated — it sinks too.
+    expect(compareValidationTier(validatedFalse, validatedTrue)).toBe(0);
+  });
+
+  it('a mixed list places every validated item after every pending item', () => {
+    const a = { id: 'q-a', ...pending };
+    const b = { id: 'q-b', ...validatedTrue };
+    const c = { id: 'q-c', ...validatedFalse };
+    const d = { id: 'q-d', ...pending };
+    const sorted = [a, b, c, d].sort(compareValidationTier).map(x => x.id);
+    expect(sorted.slice(0, 2).sort()).toEqual(['q-a', 'q-d']); // pending tier first (order preserved within tier)
+    expect(sorted.slice(2).sort()).toEqual(['q-b', 'q-c']); // validated tier last
+  });
+});
+
+// --- 6. q-sat-1e237d95 regression (claimed, math grid-in, fully reviewed) ---
+//
+// The graders load a question with this exact id. It is a Math grid-in (no
+// A/B/C/D choices), claimed by validator "Renata Okonkwo", and fully reviewed
+// with two checks at "No". These tests pin the full logic chain that question
+// goes through — mapping, verdict, checklist gating, queue membership and
+// list ordering — so the whole review workflow for that id is covered.
+
+describe('q-sat-1e237d95 regression (validator review workflow)', () => {
+  const claimedByName = 'Renata Okonkwo';
+  const qsat = makeQuestion({
+    id: 'q-sat-1e237d95',
+    category: 'Problem-Solving and Data Analysis',
+    questionType: 'grid_in',
+    choices: null,
+    correct_answer: '3/4',
+    question: 'What is the value of x that satisfies 4x = 3?',
+    formationOk: true,
+    answerOk: false,
+    categoryOk: true,
+    difficultyOk: false,
+    reviewStatus: 'pending',
+    claimedBy: 'v-renata',
+    claimedByName
+  });
+
+  it('rowToQuestion + deriveChecksVerdict: grid-in row maps cleanly and four answered checks resolve to needs_revision', () => {
+    const row: QuestionRow = {
+      id: qsat.id,
+      category: qsat.category,
+      sub_skill: null,
+      question_type: 'grid_in',
+      image_url: null,
+      passage: null,
+      stimulus: null,
+      question: qsat.question,
+      choices: null,
+      correct_answer: '3/4',
+      explanation: qsat.explanation,
+      module: 'M2',
+      section: 'math',
+      difficulty: 'medium',
+      generator_run_id: 'run-2026-09-01',
+      review_status: 'pending',
+      validator_status: null,
+      validator_feedback: null,
+      similarity_score: null,
+      similar_question_id: null,
+      formation_ok: true,
+      answer_ok: false,
+      category_ok: true,
+      difficulty_ok: false,
+      category_override: null,
+      difficulty_override: null,
+      status_override: null,
+      status_override_justification: null,
+      comments: [],
+      claimed_by: 'v-renata',
+      claimed_by_name: claimedByName,
+      claimed_at: '2026-09-10T09:00:00.000Z',
+      assigned_to: 'v-renata',
+      assigned_to_name: claimedByName,
+      requires_second_review: false,
+      consensus_reviews: [],
+      created_at: '2026-09-05T10:00:00.000Z',
+      updated_at: '2026-09-10T09:30:00.000Z'
+    };
+
+    const restored = rowToQuestion(row);
+    expect(restored.id).toBe('q-sat-1e237d95');
+    expect(restored.choices).toBeNull(); // grid-in: no A/B/C/D -> must not crash mapping
+    expect(restored.claimedByName).toBe(claimedByName);
+    expect(isQuestionValidated(restored)).toBe(true); // 4/4 answered
+    expect(deriveChecksVerdict(restored)).toBe('needs_revision'); // any "No" -> needs revision
+  });
+
+  it('after a needs-revision verdict the item stays in the validator queue (claim filter "mine")', () => {
+    const q = makeQuestion({ ...qsat, reviewStatus: 'needs_revision' });
+    expect(deriveChecksVerdict(q)).toBe('needs_revision');
+    expect(getConsensusResolution(q).primaryVerdict).toBe('needs_revision');
+    expect(matchesClaimFilter(q, 'mine', 'v-renata')).toBe(true);
+  });
+
+  it('after it is approved (all four Yes) it disappears from "My Questions" on the next fetch', () => {
+    const approved = makeQuestion({
+      ...qsat,
+      formationOk: true,
+      answerOk: true,
+      categoryOk: true,
+      difficultyOk: true,
+      reviewStatus: 'approved'
+    });
+    expect(isQuestionValidated(approved)).toBe(true);
+    expect(deriveChecksVerdict(approved)).toBe('approved');
+    expect(matchesClaimFilter(approved, 'mine', 'v-renata')).toBe(false);
+  });
+
+  it('Approve is refused while the checklist is 0/4-3/4, enabled at 4/4 (guard logic)', () => {
+    const partial = makeQuestion({ ...qsat, categoryOk: null, difficultyOk: null });
+    // Same predicate the handleApprove / handleNeedsRevision guards use:
+    // submission is blocked until every check has a real value.
+    expect(isQuestionValidated(partial)).toBe(false);
+    expect(isQuestionValidated(makeQuestion({ ...qsat, answerOk: true, difficultyOk: true }))).toBe(true);
+  });
+
+  it('once validated, q-sat-1e237d95 sinks to the last position of a mixed list', () => {
+    const validated = makeQuestion({ ...qsat, answerOk: true, difficultyOk: true, reviewStatus: 'pending' });
+    const pending = makeQuestion({
+      id: 'q-other-0001',
+      formationOk: null,
+      answerOk: null,
+      categoryOk: null,
+      difficultyOk: null,
+      reviewStatus: 'pending'
+    });
+    const sorted = [validated, pending].sort(compareValidationTier).map(x => x.id);
+    expect(sorted).toEqual(['q-other-0001', 'q-sat-1e237d95']);
   });
 });
 

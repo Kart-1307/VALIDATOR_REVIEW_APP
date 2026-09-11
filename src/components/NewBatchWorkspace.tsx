@@ -8,7 +8,7 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange, matchesClaimFilter } from '../lib/mappers';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange, matchesClaimFilter, isQuestionValidated, compareValidationTier } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -95,6 +95,8 @@ export default function NewBatchWorkspace({
   const [questions, setQuestions] = useState<SATQuestion[]>([]);
   const [loaded, setLoaded] = useState(false);
   const pendingWritesRef = useRef<Map<string, number>>(new Map());
+  const questionsRef = useRef<SATQuestion[]>(questions);
+  questionsRef.current = questions;
 
   const [filters, setFilters] = useState<FilterState>({
     search: '',
@@ -317,9 +319,9 @@ export default function NewBatchWorkspace({
               ...incoming,
               // Defensive guard: preserve local text if incoming realtime payload has TOAST-stripped nulls
               passage: incoming.passage ?? q.passage,
-              explanation: incoming.explanation || q.explanation,
+              explanation: incoming.explanation ?? q.explanation,
               stimulus: incoming.stimulus ?? q.stimulus,
-              question: incoming.question || q.question,
+              question: incoming.question ?? q.question,
               choices: (incoming.choices && Object.keys(incoming.choices).length > 0) ? incoming.choices : q.choices,
             };
           });
@@ -426,7 +428,21 @@ export default function NewBatchWorkspace({
       }, 100);
       showToast(`Exported ${questions.length} question(s) from New Batch before wiping.`, 'success');
     }
+    // Also remove the rows from questions_batch2, otherwise the "wiped" pool
+    // simply reloads the same questions on the next page load (removeBatch
+    // already deletes server-side; this must do the same for consistency).
+    const idsToDelete = questions.map(q => q.id);
+    const DELETE_CHUNK_SIZE = 500;
+    for (let i = 0; i < idsToDelete.length; i += DELETE_CHUNK_SIZE) {
+      const chunk = idsToDelete.slice(i, i + DELETE_CHUNK_SIZE);
+      const { error } = await supabase.from(TABLE_NAME).delete().in('id', chunk);
+      if (error) {
+        showToast(`Failed to wipe from Supabase: ${error.message}`, 'error');
+        return false;
+      }
+    }
     setQuestions([]);
+    setSelectedIds(new Set());
     return true;
   };
 
@@ -470,11 +486,31 @@ export default function NewBatchWorkspace({
   const handleApprove = (id: string) => {
     if (blockIfAuditor()) return;
     const question = questions.find(q => q.id === id);
-    if (question) snapshotQuestionBeforeChange(question, 'approve');
+    if (!question) return;
+    if (!isQuestionValidated(question)) {
+      showToast('Complete all four validation checks before approving.', 'error');
+      return;
+    }
+    snapshotQuestionBeforeChange(question, 'approve');
     const updated = questions.map(q => q.id === id ? { ...q, reviewStatus: 'approved' as const } : q);
     saveQuestions(updated);
     showToast('Question item approved.', 'success');
-    logEvent('approve', `Approved item "${id}" in "${question?.category || 'General'}"`, id);
+    logEvent('approve', `Approved item "${id}" in "${question.category || 'General'}"`, id);
+  };
+
+  const handleNeedsRevision = (id: string) => {
+    if (blockIfAuditor()) return;
+    const question = questions.find(q => q.id === id);
+    if (!question) return;
+    if (!isQuestionValidated(question)) {
+      showToast('Complete all four validation checks before marking for revision.', 'error');
+      return;
+    }
+    snapshotQuestionBeforeChange(question, 'needs_revision');
+    const updated = questions.map(q => q.id === id ? { ...q, reviewStatus: 'needs_revision' as const } : q);
+    saveQuestions(updated);
+    showToast(`Question sent back for revision${question.reviewStatus === 'needs_revision' ? ' (already in revision)' : ''}.`, 'info');
+    logEvent('note', `${validatorName} marked item "${id}" for revision in "${question.category || 'General'}"`, id);
   };
 
   const handleReject = (id: string) => {
@@ -490,7 +526,12 @@ export default function NewBatchWorkspace({
   const handleResetStatus = (id: string) => {
     if (blockIfAuditor()) return;
     const question = questions.find(q => q.id === id);
-    if (question) snapshotQuestionBeforeChange(question, 'reset');
+    if (!question) return;
+    if (question.claimedBy && question.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`${question.claimedByName || 'Another validator'} currently has this item claimed.`, 'error');
+      return;
+    }
+    snapshotQuestionBeforeChange(question, 'reset');
     const updated = questions.map(q => q.id === id ? {
       ...q,
       reviewStatus: 'pending' as const,
@@ -541,7 +582,8 @@ export default function NewBatchWorkspace({
     if (!question || !newCategory) return;
     snapshotQuestionBeforeChange(question, 'category_override');
     const withOverride = { ...question, category: newCategory, categoryOverride: newCategory, categoryOk: true };
-    const derived = deriveOverallStatus(withOverride);
+    let derived = deriveOverallStatus(withOverride);
+    if (question.reviewStatus === 'approved' && derived === 'pending') derived = 'approved';
     const updated = questions.map(q => q.id === id ? { ...withOverride, reviewStatus: derived } : q);
     saveQuestions(updated);
     showToast(`Category reassigned to "${newCategory}".`, 'success');
@@ -554,7 +596,8 @@ export default function NewBatchWorkspace({
     if (!question) return;
     snapshotQuestionBeforeChange(question, 'difficulty_override');
     const withOverride = { ...question, difficulty: newDifficulty, difficultyOverride: newDifficulty, difficultyOk: true };
-    const derived = deriveOverallStatus(withOverride);
+    let derived = deriveOverallStatus(withOverride);
+    if (question.reviewStatus === 'approved' && derived === 'pending') derived = 'approved';
     const updated = questions.map(q => q.id === id ? { ...withOverride, reviewStatus: derived } : q);
     saveQuestions(updated);
     showToast(`Difficulty reassigned to "${newDifficulty}".`, 'success');
@@ -590,7 +633,8 @@ export default function NewBatchWorkspace({
     if (!question) return;
     snapshotQuestionBeforeChange(question, 'clear_override');
     const cleared = { ...question, statusOverride: null, statusOverrideJustification: undefined };
-    const derived = deriveOverallStatus(cleared);
+    let derived = deriveOverallStatus(cleared);
+    if (question.reviewStatus === 'approved' && derived === 'pending') derived = 'approved';
     const updated = questions.map(q => q.id === id ? { ...cleared, reviewStatus: derived } : q);
     saveQuestions(updated);
     showToast('Manual override cleared — status reverted to auto-derived value.', 'info');
@@ -661,6 +705,12 @@ export default function NewBatchWorkspace({
 
   const handleReleaseClaim = (id: string) => {
     if (blockIfAuditor()) return;
+    const question = questions.find(q => q.id === id);
+    if (!question) return;
+    if (question.claimedBy && question.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`Cannot release this claim — it belongs to ${question.claimedByName || 'another validator'}.`, 'error');
+      return;
+    }
     const updated = questions.map(q => q.id === id ? { ...q, claimedBy: null, claimedByName: null, claimedAt: null } : q);
     saveQuestions(updated);
     logEvent('edit', `${validatorName} released the claim on item "${id}"`, id);
@@ -673,6 +723,8 @@ export default function NewBatchWorkspace({
       return;
     }
     const target = validatorId ? validators.find(v => v.id === validatorId) : null;
+    const question = questions.find(q => q.id === id);
+    if (question) snapshotQuestionBeforeChange(question, 'assign');
     const updated = questions.map(q => q.id === id ? { ...q, assignedTo: validatorId, assignedToName: target?.name || null } : q);
     saveQuestions(updated);
     logEvent('edit', target ? `${validatorName} assigned item "${id}" to ${target.name}` : `${validatorName} unassigned item "${id}"`, id);
@@ -709,12 +761,12 @@ export default function NewBatchWorkspace({
     }
     const question = questions.find(q => q.id === id);
     if (!question) return;
-    snapshotQuestionBeforeChange(question, 'resolve_consensus');
     const { primaryVerdict, secondOpinionVerdict, secondOpinionApproved, secondOpinionNeedsRevision, hasDisagreement } = getConsensusResolution(question);
     if (!hasDisagreement || !secondOpinionVerdict || primaryVerdict === 'pending') {
       showToast('There is no active primary vs. second-opinion disagreement on this item.', 'error');
       return;
     }
+    snapshotQuestionBeforeChange(question, 'resolve_consensus');
     const finalStatus: 'approved' | 'needs_revision' =
       resolution === 'primary' ? (primaryVerdict as 'approved' | 'needs_revision') : (secondOpinionVerdict as 'approved' | 'needs_revision');
     const justification = resolution === 'primary'
@@ -731,10 +783,25 @@ export default function NewBatchWorkspace({
   };
 
   const handleViewDuplicate = (question: SATQuestion) => setDuplicateCompareQuestion(question);
-  const handleEditTrigger = (q: SATQuestion) => { setSelectedEditQuestion(q); setIsEditModalOpen(true); };
+
+  const handleEditTrigger = (q: SATQuestion) => {
+    if (blockIfAuditor()) return;
+    if (q.claimedBy && q.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`${q.claimedByName || 'Another validator'} currently has this item claimed.`, 'error');
+      return;
+    }
+    setSelectedEditQuestion(q);
+    setIsEditModalOpen(true);
+  };
 
   const handleSaveEditedQuestion = (updatedQuestion: SATQuestion) => {
     if (blockIfAuditor()) return;
+    const question = questions.find(q => q.id === updatedQuestion.id);
+    if (question && question.claimedBy && question.claimedBy !== session?.user.id && !isAdmin) {
+      showToast(`${question.claimedByName || 'Another validator'} currently has this item claimed.`, 'error');
+      return;
+    }
+    if (question) snapshotQuestionBeforeChange(question, 'edit');
     const updated = questions.map(q => q.id === updatedQuestion.id ? updatedQuestion : q);
     saveQuestions(updated);
     showToast('Question changes saved successfully.', 'success');
@@ -827,6 +894,10 @@ export default function NewBatchWorkspace({
 
   const difficultyRank: Record<string, number> = { easy: 0, medium: 1, hard: 2 };
   const sortedQuestions = useMemo(() => [...filteredQuestions].sort((a, b) => {
+    // Validated (all 4 checks answered) questions sink to the LAST position;
+    // the user-selected sort still applies within each validation tier.
+    const tierCmp = compareValidationTier(a, b);
+    if (tierCmp !== 0) return tierCmp;
     let cmp = 0;
     switch (sortField) {
       case 'dateGenerated':
@@ -848,7 +919,7 @@ export default function NewBatchWorkspace({
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  useEffect(() => { setCurrentPage(1); }, [filters, questions.length, batchFilter]);
+  useEffect(() => { setCurrentPage(1); setSelectedIds(new Set()); }, [filters, questions.length, batchFilter]);
   const totalPages = Math.max(1, Math.ceil(filteredQuestions.length / pageSize));
   const pageSafe = Math.min(currentPage, totalPages);
   const paginatedQuestions = useMemo(() => sortedQuestions.slice((pageSafe - 1) * pageSize, pageSafe * pageSize), [sortedQuestions, pageSafe, pageSize]);
@@ -863,7 +934,7 @@ export default function NewBatchWorkspace({
     return map;
   }, [logs]);
 
-  const reviewedCount = stats.approved + stats.rejected;
+  const reviewedCount = stats.approved + stats.rejected + stats.needsRevision;
   const reviewProgressPct = stats.total === 0 ? 0 : Math.round((reviewedCount / stats.total) * 100);
   const hasActiveFilters = !!(filters.search || filters.section || filters.category || filters.difficulty || filters.status !== 'all' || filters.generatorRunId || filters.assignedOrClaimedBy || (filters.claimFilter && filters.claimFilter !== 'all') || filters.dateFrom || filters.dateTo);
 
@@ -895,7 +966,7 @@ export default function NewBatchWorkspace({
       return updated;
     });
   };
-  const handleSelectAllVisible = () => setSelectedIds(new Set(filteredQuestions.map(q => q.id)));
+  const handleSelectAllVisible = () => setSelectedIds(new Set(paginatedQuestions.map(q => q.id)));
   const handleClearSelection = () => setSelectedIds(new Set());
 
   const handleApproveAllFiltered = () => {
@@ -1033,6 +1104,8 @@ export default function NewBatchWorkspace({
       validatorFeedback: q.validatorFeedback || q.validator_feedback || q.feedback || undefined,
       similarity_score: q.similarity_score,
       similar_question_id: q.similar_question_id,
+      questionType: q.questionType || (q.choices ? 'mcq' : 'grid_in'),
+      imageUrl: q.imageUrl || q.image_url || null,
       reviewerNote: q.reviewerNote || q.reviewer_note || undefined,
       comments: Array.isArray(q.comments)
         ? q.comments
@@ -1099,7 +1172,7 @@ export default function NewBatchWorkspace({
     });
 
     const merged = new Map<string, SATQuestion>();
-    questions.forEach(q => merged.set(q.id, q));
+    questionsRef.current.forEach(q => merged.set(q.id, q));
     let incomingCount = 0;
     let updatedCount = 0;
     succeeded.forEach(({ value }) => {
@@ -2002,6 +2075,7 @@ export default function NewBatchWorkspace({
                   if (next) document.getElementById(`question-${next.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }}
                 onApprove={handleApprove}
+                onNeedsRevision={handleNeedsRevision}
                 onReject={handleReject}
                 onResetStatus={handleResetStatus}
                 onEdit={handleEditTrigger}
@@ -2047,7 +2121,7 @@ export default function NewBatchWorkspace({
             </button>
             <span className="text-zinc-500">|</span>
             <span>Rows per page</span>
-            <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }} className="bg-[#fafafa] border border-[#e4e4e7] rounded-md px-2 py-1 text-zinc-600 focus:outline-none focus:ring-1 focus:ring-[#6366f1] cursor-pointer">
+            <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); setSelectedIds(new Set()); }} className="bg-[#fafafa] border border-[#e4e4e7] rounded-md px-2 py-1 text-zinc-600 focus:outline-none focus:ring-1 focus:ring-[#6366f1] cursor-pointer">
               {[10, 25, 50, 100].map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           </div>

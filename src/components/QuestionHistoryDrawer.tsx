@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, History, RotateCcw, ShieldCheck, Loader2, AlertCircle } from 'lucide-react';
 import { SATQuestion, QuestionSnapshot } from '../types';
@@ -85,8 +85,12 @@ export default function QuestionHistoryDrawer({ isOpen, question, isAdmin, onClo
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  // Guards against a slow earlier fetch clobbering a newer one when the admin
+  // switches between questions faster than the snapshot query resolves.
+  const loadRequestRef = useRef(0);
 
   const loadSnapshots = async (questionId: string) => {
+    const requestId = ++loadRequestRef.current;
     setLoading(true);
     setLoadError(null);
     const { data, error } = await supabase
@@ -94,6 +98,7 @@ export default function QuestionHistoryDrawer({ isOpen, question, isAdmin, onClo
       .select('*')
       .eq('question_id', questionId)
       .order('created_at', { ascending: false });
+    if (requestId !== loadRequestRef.current) return; // superseded by a newer load
     if (error) {
       setLoadError(error.message);
       setSnapshots([]);
