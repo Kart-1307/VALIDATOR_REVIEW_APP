@@ -2,7 +2,7 @@ node_modules/
 .env
 .env.local
 
-# Internal analysis / reconciliation docs ? audit artifacts, kept out of VCS.
+# Internal analysis/reconciliation docs — audit artifacts, kept out of version control.
 docs/APP_FLOW_AND_STACK.md
 docs/export-reconciliation-fix.md
 docs/LOGIC_AUDIT_REPORT.md
