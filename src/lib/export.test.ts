@@ -6,6 +6,7 @@ import {
   toLocalDateKey,
   isApprovedInDateRange,
   isRawInDateRange,
+  isReviewed,
   matchesClaimFilter,
   isQuestionValidated,
   compareValidationTier,
@@ -260,6 +261,12 @@ describe('isApprovedInDateRange', () => {
     expect(isApprovedInDateRange(approvedOn('2026-09-06'), '2026-09-07', '2026-09-05')).toBe(true);
   });
 
+  it('uses reviewedAt over updatedAt so later edits do not move the approval date', () => {
+    const q = makeQuestion({ reviewStatus: 'approved', reviewedAt: '2026-09-05T12:00:00.000Z', updatedAt: '2026-09-09T12:00:00.000Z' });
+    expect(isApprovedInDateRange(q, '2026-09-05', '2026-09-05')).toBe(true);
+    expect(isApprovedInDateRange(q, '2026-09-09', '2026-09-09')).toBe(false);
+  });
+
   it('returns false when there are no results (no question in range)', () => {
     expect(isApprovedInDateRange(approvedOn('2026-09-01'), '2026-09-06', '2026-09-06')).toBe(false);
   });
@@ -280,42 +287,39 @@ describe('isApprovedInDateRange', () => {
 // --- Date-wise RAW export filter -------------------------------------------
 
 describe('isRawInDateRange (raw date-range filter)', () => {
-  const createdOn = (dateKey: string, status: SATQuestion['reviewStatus'] = 'pending') =>
-    makeQuestion({ reviewStatus: status, createdAt: `${dateKey}T10:00:00.000Z` });
+  const reviewedOn = (dateKey: string, status: SATQuestion['reviewStatus'] = 'approved') =>
+    makeQuestion({ reviewStatus: status, reviewedAt: `${dateKey}T10:00:00.000Z` });
 
-  it('includes raw questions regardless of review status', () => {
-    const pending = createdOn('2026-09-06', 'pending');
-    const approved = createdOn('2026-09-06', 'approved');
-    const rejected = createdOn('2026-09-06', 'rejected');
-    expect(isRawInDateRange(pending, '2026-09-06', '2026-09-06')).toBe(true);
-    expect(isRawInDateRange(approved, '2026-09-06', '2026-09-06')).toBe(true);
-    expect(isRawInDateRange(rejected, '2026-09-06', '2026-09-06')).toBe(true);
+  it('includes every reviewed status but not pending', () => {
+    expect(isRawInDateRange(reviewedOn('2026-09-06', 'approved'), '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(reviewedOn('2026-09-06', 'rejected'), '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(reviewedOn('2026-09-06', 'needs_revision'), '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(reviewedOn('2026-09-06', 'pending'), '2026-09-06', '2026-09-06')).toBe(false);
   });
 
-  it('filters by a single day (inclusive) using created_at', () => {
-    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-06', '2026-09-06')).toBe(true);
-    expect(isRawInDateRange(createdOn('2026-09-05'), '2026-09-06', '2026-09-06')).toBe(false);
+  it('filters by review date, not creation date', () => {
+    const q = makeQuestion({ reviewStatus: 'rejected', createdAt: '2026-09-01T10:00:00.000Z', reviewedAt: '2026-09-06T10:00:00.000Z' });
+    expect(isRawInDateRange(q, '2026-09-06', '2026-09-06')).toBe(true);
+    expect(isRawInDateRange(q, '2026-09-01', '2026-09-01')).toBe(false);
   });
 
-  it('supports multi-day ranges (inclusive endpoints)', () => {
-    expect(isRawInDateRange(createdOn('2026-09-05'), '2026-09-05', '2026-09-07')).toBe(true);
-    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-05', '2026-09-07')).toBe(true);
-    expect(isRawInDateRange(createdOn('2026-09-07'), '2026-09-05', '2026-09-07')).toBe(true);
-    expect(isRawInDateRange(createdOn('2026-09-08'), '2026-09-05', '2026-09-07')).toBe(false);
+  it('agrees with isApprovedInDateRange for the same approved question and range', () => {
+    const q = reviewedOn('2026-09-06', 'approved');
+    expect(isRawInDateRange(q, '2026-09-06', '2026-09-06')).toBe(isApprovedInDateRange(q, '2026-09-06', '2026-09-06'));
+    expect(isRawInDateRange(q, '2026-09-07', '2026-09-07')).toBe(isApprovedInDateRange(q, '2026-09-07', '2026-09-07'));
   });
 
-  it('handles a reversed (from > to) range the same as sorted', () => {
-    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-07', '2026-09-05')).toBe(true);
-  });
-
-  it('returns false when there are no matching questions in range', () => {
-    expect(isRawInDateRange(createdOn('2026-09-01'), '2026-09-06', '2026-09-06')).toBe(false);
+  it('supports multi-day ranges (inclusive) and reversed ranges', () => {
+    expect(isRawInDateRange(reviewedOn('2026-09-05'), '2026-09-05', '2026-09-07')).toBe(true);
+    expect(isRawInDateRange(reviewedOn('2026-09-07'), '2026-09-05', '2026-09-07')).toBe(true);
+    expect(isRawInDateRange(reviewedOn('2026-09-08'), '2026-09-05', '2026-09-07')).toBe(false);
+    expect(isRawInDateRange(reviewedOn('2026-09-06'), '2026-09-07', '2026-09-05')).toBe(true);
   });
 
   it('returns false when a date is missing or invalid', () => {
-    expect(isRawInDateRange(makeQuestion({ createdAt: null, updatedAt: null }), '2026-09-06', '2026-09-06')).toBe(false);
-    expect(isRawInDateRange(createdOn('2026-09-06'), '', '2026-09-06')).toBe(false);
-    expect(isRawInDateRange(createdOn('2026-09-06'), '2026-09-06', '')).toBe(false);
+    expect(isRawInDateRange(makeQuestion({ reviewStatus: 'approved', reviewedAt: null, createdAt: null, updatedAt: null }), '2026-09-06', '2026-09-06')).toBe(false);
+    expect(isRawInDateRange(reviewedOn('2026-09-06'), '', '2026-09-06')).toBe(false);
+    expect(isRawInDateRange(reviewedOn('2026-09-06'), '2026-09-06', '')).toBe(false);
   });
 });
 
@@ -562,5 +566,16 @@ describe('question representation — one complete question per record', () => {
     ];
     expect(list.map(buildRawExportRecord)).toHaveLength(3);
     expect(list.map(buildProductionBankRecord)).toHaveLength(3);
+  });
+});
+
+describe('isReviewed', () => {
+  it('is true only for approved, rejected and needs_revision', () => {
+    expect(isReviewed({ reviewStatus: 'approved' })).toBe(true);
+    expect(isReviewed({ reviewStatus: 'rejected' })).toBe(true);
+    expect(isReviewed({ reviewStatus: 'needs_revision' })).toBe(true);
+    expect(isReviewed({ reviewStatus: 'pending' })).toBe(false);
+    expect(isReviewed({ reviewStatus: null })).toBe(false);
+    expect(isReviewed({})).toBe(false);
   });
 });

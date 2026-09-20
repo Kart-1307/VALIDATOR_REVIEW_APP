@@ -59,11 +59,11 @@ export interface SATQuestion {
   difficulty: 'easy' | 'medium' | 'hard' | string;
   reviewStatus?: 'pending' | 'approved' | 'rejected' | 'needs_revision';
   createdAt?: string;
-  // Last-modified timestamp (DB `updated_at`, trigger-maintained). Used as a
-  // best-effort "approved on" date for the datewise approved-questions
-  // export — there's no dedicated approved_at column yet, so this is the
-  // closest signal we have (see mappers.ts: toLocalDateKey).
+  // Last-modified timestamp (DB `updated_at`, trigger-maintained).
   updatedAt?: string;
+  // When the current review decision (approved / rejected / needs revision) was made
+  // (DB `reviewed_at`, trigger-maintained); null while pending.
+  reviewedAt?: string | null;
 
   // --- New Batch tab only: which upload this question was introduced by.
   // batchUploadedAt is the effectively-unique key (ISO timestamp of the

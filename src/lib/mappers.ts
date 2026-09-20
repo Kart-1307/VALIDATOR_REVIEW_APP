@@ -40,6 +40,7 @@ export interface QuestionRow {
   consensus_reviews: SATQuestion['consensusReviews'];
   created_at: string;
   updated_at: string;
+  reviewed_at?: string | null;
 }
 
 // Local (browser timezone) yyyy-mm-dd for a timestamp. Used to bucket a
@@ -60,40 +61,42 @@ export function toLocalDateKey(isoTimestamp: string | null | undefined): string 
 // (NewBatchWorkspace.tsx: downloadApprovedRangeBatch), so brushing up a
 // timezone/edge-case fix here propagates to both exports.
 //
-// NOTE (repository limitation): there is no dedicated `approved_at` column in
-// the schema, so `updated_at` is used as the best-effort "when was this
-// approved" proxy (the `questions_set_updated_at` trigger bumps it whenever a
-// question row changes, which includes the approve action). `fromKey`/`toKey`
-// are inclusive yyyy-mm-dd local-date keys. A question approved around
-// midnight is bucketed by the browser's local timezone via toLocalDateKey,
-// i.e. the same tz the app itself runs in.
+// The approval date is `reviewed_at` (set by a DB trigger when review_status
+// changes to a decision); `updated_at`/`created_at` are only fallbacks for rows
+// that predate the column. `fromKey`/`toKey` are inclusive yyyy-mm-dd
+// local-date keys, bucketed in the browser's timezone via toLocalDateKey.
 export function isApprovedInDateRange(
-  q: { reviewStatus?: string | null; updatedAt?: string | null; createdAt?: string | null },
+  q: { reviewStatus?: string | null; reviewedAt?: string | null; updatedAt?: string | null; createdAt?: string | null },
   fromKey: string,
   toKey: string
 ): boolean {
   if (!q || q.reviewStatus !== 'approved') return false;
   if (!fromKey || !toKey) return false;
   const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
-  const dateKey = toLocalDateKey(q.updatedAt || q.createdAt);
+  const dateKey = toLocalDateKey(q.reviewedAt || q.updatedAt || q.createdAt);
   return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
 }
 
-// Shared date-range filter for the date-wise RAW export. Unlike
-// isApprovedInDateRange this does NOT require the approved status — it matches
-// every raw question (regardless of review_status) whose business date falls
-// within the inclusive range. The business date is `created_at` (question
-// creation), the same createdAt field the New Batch workspace's existing
-// date filter already uses (see NewBatchWorkspace: filters.dateFrom/dateTo).
-// `fromKey`/`toKey` are inclusive yyyy-mm-dd local-date keys.
+// A question has been validated once a decision (approved / rejected / needs
+// revision) has been made; pending ones are not part of any raw export.
+export function isReviewed(q: { reviewStatus?: string | null }): boolean {
+  return !!q.reviewStatus && q.reviewStatus !== 'pending';
+}
+
+// Shared date-range filter for the date-wise RAW export. Matches every question
+// that has a review decision (approved / rejected / needs revision) whose
+// decision date falls in the inclusive yyyy-mm-dd local-date range — the same
+// date basis as isApprovedInDateRange, so both exports agree for a given range.
+// Pending questions are excluded: they have not been validated yet.
 export function isRawInDateRange(
-  q: { createdAt?: string | null; updatedAt?: string | null },
+  q: { reviewStatus?: string | null; reviewedAt?: string | null; updatedAt?: string | null; createdAt?: string | null },
   fromKey: string,
   toKey: string
 ): boolean {
   if (!q || !fromKey || !toKey) return false;
+  if (!isReviewed(q)) return false;
   const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
-  const dateKey = toLocalDateKey(q.createdAt || q.updatedAt);
+  const dateKey = toLocalDateKey(q.reviewedAt || q.updatedAt || q.createdAt);
   return !!dateKey && dateKey >= rangeStart && dateKey <= rangeEnd;
 }
 
@@ -310,10 +313,8 @@ export function rowToQuestion(row: QuestionRow): SATQuestion {
     createdAt: row.created_at,
     // Not written back on upsert (questionToRow deliberately omits it — the
     // `questions_set_updated_at` trigger in schema.sql owns this column).
-    // Used as the best-effort "when was this last touched" signal for the
-    // datewise approved-questions export, since there is no dedicated
-    // approved_at column.
     updatedAt: row.updated_at,
+    reviewedAt: row.reviewed_at ?? null,
     validatorStatus: row.validator_status || undefined,
     validatorFeedback: row.validator_feedback || undefined,
     similarity_score: row.similarity_score ?? undefined,

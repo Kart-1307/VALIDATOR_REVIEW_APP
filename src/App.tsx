@@ -15,7 +15,10 @@ import ValidatorProgressModal from './components/ValidatorProgressModal';
 import Login from './components/Login';
 import UpdatePassword from './components/UpdatePassword';
 import { supabase, Profile } from './lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, matchesClaimFilter, isQuestionValidated } from './lib/mappers';
+import { fetchAllQuestions } from './lib/fetchAllQuestions';
+import ExportMenu from './components/ExportMenu';
+import { downloadJson } from './lib/downloadJson';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isRawInDateRange, isApprovedInDateRange, isReviewed, matchesClaimFilter, isQuestionValidated } from './lib/mappers';
 import { getConsensusResolution } from './lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -283,28 +286,6 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isExportMenuOpen]);
 
-  // --- Standalone date-range popover for the "Export Approved (New Schema)"
-  // button — deliberately its own control, NOT nested inside the "More
-  // Exports" dropdown above. It was living inside that dropdown before and
-  // got mistaken for the "Total Test Bank" row (all statuses, full raw
-  // schema), which is why the wrong file/format kept getting downloaded.
-  // See downloadApprovedRangeBatch below.
-  const [isRangeExportOpen, setIsRangeExportOpen] = useState(false);
-  const rangeExportMenuRef = useRef<HTMLDivElement>(null);
-  const todayKey = toLocalDateKey(new Date().toISOString()) || '';
-  const [exportRangeFrom, setExportRangeFrom] = useState<string>(todayKey);
-  const [exportRangeTo, setExportRangeTo] = useState<string>(todayKey);
-  useEffect(() => {
-    if (!isRangeExportOpen) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (rangeExportMenuRef.current && !rangeExportMenuRef.current.contains(e.target as Node)) {
-        setIsRangeExportOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isRangeExportOpen]);
-
   // --- Per-question revert history (admin-only "History" drawer) ---
   const [historyDrawerQuestion, setHistoryDrawerQuestion] = useState<SATQuestion | null>(null);
   const handleOpenHistory = (question: SATQuestion) => setHistoryDrawerQuestion(question);
@@ -388,8 +369,12 @@ export default function App() {
           .from('questions')
           .select('*')
           .order('created_at', { ascending: false })
+          .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
-        if (qError || !qRows) break;
+        if (qError || !qRows) {
+          if (qError && !cancelled) showToast(`Could not load all questions: ${qError.message}`, 'error');
+          break;
+        }
         if (first) {
           setQuestions((qRows as QuestionRow[]).map(rowToQuestion));
           first = false;
@@ -400,8 +385,8 @@ export default function App() {
             return [...prev, ...incoming.filter(q => !seen.has(q.id))];
           });
         }
-        if (qRows.length < PAGE) break;
-        from += PAGE;
+        if (qRows.length === 0) break;
+        from += qRows.length;
       }
 
       const start14DaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
@@ -1548,12 +1533,14 @@ export default function App() {
   // round-trip the app's own internal shape, filtered/flattened per status),
   // this maps approved questions to the spec's production data model — the
   // format MySAT AI Coach's production bank is meant to consume.
-  const downloadProductionBank = () => {
+  const downloadProductionBank = async () => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    const approved = questions.filter(q => q.reviewStatus === 'approved');
+    const source = await loadExportSource();
+    if (!source) return;
+    const approved = source.filter(q => q.reviewStatus === 'approved');
     if (approved.length === 0) {
       showToast('No approved questions yet — approve some before exporting the production bank.', 'error');
       return;
@@ -1592,7 +1579,7 @@ export default function App() {
   // Accepts a from/to date range (inclusive) instead of a single day, so a
   // multi-day backlog can be pulled in one file, or a single day by setting
   // from === to.
-  const downloadApprovedRangeBatch = (fromKey: string, toKey: string) => {
+  const downloadApprovedRangeBatch = async (fromKey: string, toKey: string) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
@@ -1602,7 +1589,9 @@ export default function App() {
       return;
     }
     const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
-    const approvedInRange = questions.filter(q => isApprovedInDateRange(q, fromKey, toKey));
+    const source = await loadExportSource();
+    if (!source) return;
+    const approvedInRange = source.filter(q => isApprovedInDateRange(q, fromKey, toKey));
     if (approvedInRange.length === 0) {
       showToast(`No questions were approved between ${rangeStart} and ${rangeEnd}.`, 'error');
       return;
@@ -1625,7 +1614,6 @@ export default function App() {
 
     showToast(`Exported ${records.length} question(s) approved between ${rangeStart} and ${rangeEnd}.`, 'success');
     logEvent('note', `Exported ${records.length} approved question(s) for ${rangeStart} to ${rangeEnd} (student app batch)`);
-    setIsRangeExportOpen(false);
   };
 
   // --- Bucketed exports (Approved / Rejected / Needs Revision / Total Test
@@ -1648,15 +1636,36 @@ export default function App() {
     all: 'total-test-bank'
   };
 
-  const questionsInBucket = (bucket: ExportBucket) =>
-    bucket === 'all' ? questions : questions.filter(q => (q.reviewStatus || 'pending') === bucket);
+  const questionsInBucket = (bucket: ExportBucket, source: SATQuestion[] = questions) =>
+    bucket === 'all' ? source : source.filter(q => (q.reviewStatus || 'pending') === bucket);
 
-  const exportBucketAsJson = (bucket: ExportBucket) => {
+  const waitForPendingWrites = async () => {
+    for (let i = 0; i < 50 && pendingWritesRef.current.size > 0; i++) await new Promise(r => setTimeout(r, 200));
+    return pendingWritesRef.current.size === 0;
+  };
+
+  // Exports read from the database, not the in-memory list, which can be partial or stale.
+  const loadExportSource = async (): Promise<SATQuestion[] | null> => {
+    if (!(await waitForPendingWrites())) {
+      showToast('Still saving recent changes — try the export again in a moment.', 'error');
+      return null;
+    }
+    try {
+      return await fetchAllQuestions('questions');
+    } catch (err) {
+      showToast(`Export cancelled — could not read questions from the database: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      return null;
+    }
+  };
+
+  const exportBucketAsJson = async (bucket: ExportBucket) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    const list = questionsInBucket(bucket);
+    const source = await loadExportSource();
+    if (!source) return;
+    const list = questionsInBucket(bucket, source);
     if (list.length === 0) {
       showToast(`No ${EXPORT_BUCKET_LABELS[bucket].toLowerCase()} to export.`, 'error');
       return;
@@ -1688,16 +1697,19 @@ export default function App() {
   // which was easy to hit by mistake when reaching for the datewise
   // approved-questions export below — this is now its own one-click button
   // so the two can't be confused.
-  const downloadRawExport = () => {
+  const downloadRawExport = async () => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    if (questions.length === 0) {
-      showToast('No questions to export.', 'error');
+    const source = await loadExportSource();
+    if (!source) return;
+    const reviewed = source.filter(isReviewed);
+    if (reviewed.length === 0) {
+      showToast('No reviewed questions to export.', 'error');
       return;
     }
-    const records = questions.map(buildRawExportRecord);
+    const records = reviewed.map(buildRawExportRecord);
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
@@ -1710,8 +1722,52 @@ export default function App() {
       URL.revokeObjectURL(url);
     }, 100);
 
-    showToast(`Exported ${records.length} question(s) — Raw (full detail).`, 'success');
+    showToast(`Exported ${records.length} question(s) — Raw (full detail, reviewed only).`, 'success');
     logEvent('note', `Exported ${records.length} question(s) — Raw (full detail)`);
+  };
+
+  const downloadRawRangeExport = async (fromKey: string, toKey: string) => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    if (!fromKey || !toKey) {
+      showToast('Pick both a from and to date to export.', 'error');
+      return;
+    }
+    if (fromKey > toKey) {
+      showToast('The "From" date cannot be after the "To" date.', 'error');
+      return;
+    }
+    const source = await loadExportSource();
+    if (!source) return;
+    const inRange = source.filter(q => isRawInDateRange(q, fromKey, toKey));
+    if (inRange.length === 0) {
+      showToast(`No reviewed questions found between ${fromKey} and ${toKey}.`, 'error');
+      return;
+    }
+    const records = inRange.map(buildRawExportRecord);
+    downloadJson(records, `raw-export-${fromKey === toKey ? fromKey : `${fromKey}_to_${toKey}`}.json`);
+    showToast(`Exported ${records.length} reviewed raw question(s) between ${fromKey} and ${toKey}.`, 'success');
+    logEvent('note', `Exported ${records.length} reviewed raw question(s) for ${fromKey} to ${toKey} (full detail)`);
+  };
+
+  const downloadApprovedAll = async () => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    const source = await loadExportSource();
+    if (!source) return;
+    const approved = source.filter(q => q.reviewStatus === 'approved');
+    if (approved.length === 0) {
+      showToast('No approved questions to export.', 'error');
+      return;
+    }
+    const records = approved.map(buildProductionExportRecord);
+    downloadJson(records, `approved-questions-all-${toLocalDateKey(new Date().toISOString())}.json`);
+    showToast(`Exported ${records.length} approved question(s) (student app schema).`, 'success');
+    logEvent('note', `Exported ${records.length} approved question(s) — all dates (student app schema)`);
   };
 
   // Comments/consensus reviews are arrays on the question, but a spreadsheet
@@ -1732,12 +1788,14 @@ export default function App() {
           })
           .join(' | ');
 
-  const exportBucketAsExcel = (bucket: ExportBucket) => {
+  const exportBucketAsExcel = async (bucket: ExportBucket) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    const list = questionsInBucket(bucket);
+    const source = await loadExportSource();
+    if (!source) return;
+    const list = questionsInBucket(bucket, source);
     if (list.length === 0) {
       showToast(`No ${EXPORT_BUCKET_LABELS[bucket].toLowerCase()} to export.`, 'error');
       return;
@@ -2331,69 +2389,37 @@ export default function App() {
                       Export Production Bank
                     </button>
 
-                    <button
-                      onClick={downloadRawExport}
-                      disabled={questions.length === 0}
-                      title="Export every question with the full internal/validator-detail schema"
-                      className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
-                        questions.length === 0
-                          ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                          : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
-                      }`}
-                    >
-                      <Download className="w-4 h-4" />
-                      Export Raw
-                    </button>
+                    <ExportMenu
+                      label="Export Raw"
+                      title="Export reviewed questions (approved, rejected, needs revision) with the full internal/validator-detail schema — all of them or a date range"
+                      disabled={questions.length === stats.pending}
+                      buttonClassName="bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs"
+                      confirmClassName="border-zinc-800 bg-zinc-800 text-white hover:bg-zinc-900"
+                      all={{ label: 'Export All Raw', hint: 'Every reviewed question, full internal schema', onExport: downloadRawExport }}
+                      range={{
+                        label: 'Export Raw (Date Range)',
+                        hint: 'Filter by review date',
+                        heading: 'Raw Questions Export',
+                        description: 'Reviewed questions decided within the selected range (full internal schema).',
+                        onExport: downloadRawRangeExport
+                      }}
+                    />
 
-                    <div className="relative" ref={rangeExportMenuRef}>
-                      <button
-                        onClick={() => setIsRangeExportOpen(open => !open)}
-                        title="Export approved questions (student app schema) for a date range"
-                        className="inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
-                      >
-                        <Download className="w-4 h-4" />
-                        Export Approved (Date Range)
-                      </button>
-
-                      {isRangeExportOpen && (
-                        <div className="absolute right-0 mt-1.5 w-72 bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5">
-                          <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
-                          <p className="text-[11px] text-zinc-500 mb-2">Only questions approved within the selected range</p>
-                          <div className="flex flex-col gap-2">
-                            <label className="text-[11px] font-semibold text-zinc-600">
-                              From
-                              <input
-                                type="date"
-                                value={exportRangeFrom}
-                                onChange={(e) => setExportRangeFrom(e.target.value)}
-                                className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                              />
-                            </label>
-                            <label className="text-[11px] font-semibold text-zinc-600">
-                              To
-                              <input
-                                type="date"
-                                value={exportRangeTo}
-                                onChange={(e) => setExportRangeTo(e.target.value)}
-                                className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                              />
-                            </label>
-                            <button
-                              onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
-                              disabled={!exportRangeFrom || !exportRangeTo}
-                              title="Download the selected range's approved questions in the student app schema"
-                              className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
-                                !exportRangeFrom || !exportRangeTo
-                                  ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                                  : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
-                              }`}
-                            >
-                              <FileText className="w-3 h-3" /> Download JSON
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <ExportMenu
+                      label="Export Approved"
+                      title="Export approved questions in the student app schema — all of them or a date range"
+                      disabled={stats.approved === 0}
+                      buttonClassName="bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
+                      confirmClassName="border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700"
+                      all={{ label: 'Export All Approved', hint: 'Every approved question, student app schema', onExport: downloadApprovedAll }}
+                      range={{
+                        label: 'Export Approved (Date Range)',
+                        hint: 'Filter by approval date',
+                        heading: 'Approved Questions (Student App Schema)',
+                        description: 'Only questions approved within the selected range',
+                        onExport: downloadApprovedRangeBatch
+                      }}
+                    />
 
                     <div className="relative" ref={exportMenuRef}>
                       <button

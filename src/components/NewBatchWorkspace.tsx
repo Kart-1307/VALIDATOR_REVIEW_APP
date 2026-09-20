@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { SATQuestion, FilterState, StatsSummary, QuestionComment, SortField, SortDirection, ValidatorInvite, MAX_CONSENSUS_REVIEWERS, QuestionSnapshot, ConsensusReview } from '../types';
 import StatsGrid from './StatsGrid';
 import FiltersPanel from './FiltersPanel';
@@ -8,7 +8,10 @@ import EditModal from './EditModal';
 import DuplicateCompareModal from './DuplicateCompareModal';
 import QuestionHistoryDrawer from './QuestionHistoryDrawer';
 import { supabase, Profile } from '../lib/supabaseClient';
-import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isRawInDateRange, matchesClaimFilter, isQuestionValidated } from '../lib/mappers';
+import { fetchAllQuestions } from '../lib/fetchAllQuestions';
+import ExportMenu from './ExportMenu';
+import { downloadJson } from '../lib/downloadJson';
+import { rowToQuestion, questionToRow, QuestionRow, toLocalDateKey, buildProductionExportRecord, buildProductionBankRecord, buildRawExportRecord, isApprovedInDateRange, isReviewed, isRawInDateRange, matchesClaimFilter, isQuestionValidated } from '../lib/mappers';
 import { getConsensusResolution } from '../lib/consensus';
 import type { Session } from '@supabase/supabase-js';
 import {
@@ -26,8 +29,7 @@ import {
   ChevronDown,
   FileSpreadsheet,
   Download,
-  Tag,
-  CalendarRange
+  Tag
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -147,80 +149,6 @@ export default function NewBatchWorkspace({
     return () => document.removeEventListener('mousedown', handler);
   }, [isExportMenuOpen]);
 
-  // --- Standalone date-range popover for "Export Approved (Date Range)" —
-  // its own control, not nested inside the "More Exports" dropdown above,
-  // so it can't be mistaken for "Total New Batch Pool" (all statuses, full
-  // raw schema). Mirrors the same control on the Curator tab exactly.
-  const [isRangeExportOpen, setIsRangeExportOpen] = useState(false);
-  const rangeExportMenuRef = useRef<HTMLDivElement>(null);
-  const todayKey = toLocalDateKey(new Date().toISOString()) || '';
-  const [exportRangeFrom, setExportRangeFrom] = useState<string>(todayKey);
-  const [exportRangeTo, setExportRangeTo] = useState<string>(todayKey);
-  useEffect(() => {
-    if (!isRangeExportOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (rangeExportMenuRef.current && !rangeExportMenuRef.current.contains(e.target as Node)) {
-        setIsRangeExportOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [isRangeExportOpen]);
-
-  // Keep the date-range export popover fully inside the viewport: flip it to
-  // open ABOVE the trigger button when there isn't enough room below it.
-  const [rangePopupAbove, setRangePopupAbove] = useState(false);
-  useLayoutEffect(() => {
-    if (!isRangeExportOpen) return;
-    const wrap = rangeExportMenuRef.current;
-    if (!wrap) return;
-    const btn = wrap.querySelector('button');
-    const popup = wrap.querySelector('[data-range-popup]');
-    if (!btn || !popup) return;
-    const wrapRect = wrap.getBoundingClientRect();
-    const popupHeight = (popup as HTMLElement).offsetHeight;
-    const spaceBelow = window.innerHeight - wrapRect.bottom;
-    const spaceAbove = wrapRect.top;
-    setRangePopupAbove(popupHeight > spaceBelow && popupHeight <= spaceAbove);
-  }, [isRangeExportOpen]);
-
-  // --- Raw Export dropdown (Export All / Export Raw Date Range). "Export All"
-  // keeps the original one-click export; "Export Raw (Date Range)" opens a
-  // date picker that filters raw questions by created_at before exporting with
-  // the SAME full raw/new-batch schema (buildRawExportRecord).
-  const [isRawExportMenuOpen, setIsRawExportMenuOpen] = useState(false);
-  const rawExportMenuRef = useRef<HTMLDivElement>(null);
-  const [rawRangeOpen, setRawRangeOpen] = useState(false);
-  const [rawRangeFrom, setRawRangeFrom] = useState<string>(todayKey);
-  const [rawRangeTo, setRawRangeTo] = useState<string>(todayKey);
-  // Flip the raw date-range popup to open above when there isn't enough room
-  // below, so it is never clipped by the viewport.
-  const [rawRangePopupAbove, setRawRangePopupAbove] = useState(false);
-  useLayoutEffect(() => {
-    if (!rawRangeOpen) return;
-    const wrap = rawExportMenuRef.current;
-    if (!wrap) return;
-    const btn = wrap.querySelector('button');
-    const popup = wrap.querySelector('[data-raw-range-popup]');
-    if (!btn || !popup) return;
-    const wrapRect = wrap.getBoundingClientRect();
-    const popupHeight = (popup as HTMLElement).offsetHeight;
-    const spaceBelow = window.innerHeight - wrapRect.bottom;
-    const spaceAbove = wrapRect.top;
-    setRawRangePopupAbove(popupHeight > spaceBelow && popupHeight <= spaceAbove);
-  }, [rawRangeOpen]);
-  useEffect(() => {
-    if (!isRawExportMenuOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (rawExportMenuRef.current && !rawExportMenuRef.current.contains(e.target as Node)) {
-        setIsRawExportMenuOpen(false);
-        setRawRangeOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [isRawExportMenuOpen]);
-
   // --- Merge into Curator (admin-only) ---
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
   const [mergeScope, setMergeScope] = useState<'approved' | 'selected' | 'all'>('approved');
@@ -285,7 +213,10 @@ export default function NewBatchWorkspace({
           .order('created_at', { ascending: false })
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
-        if (qError || !qRows) break;
+        if (qError || !qRows) {
+          if (qError && !cancelled) showToast(`Could not load all questions: ${qError.message}`, 'error');
+          break;
+        }
         if (first) {
           setQuestions((qRows as Batch2Row[]).map(rowToBatch2Question));
           first = false;
@@ -296,8 +227,8 @@ export default function NewBatchWorkspace({
             return [...prev, ...incoming.filter(q => !seen.has(q.id))];
           });
         }
-        if (qRows.length < PAGE) break;
-        from += PAGE;
+        if (qRows.length === 0) break;
+        from += qRows.length;
       }
       if (!cancelled) setLoaded(true);
     })();
@@ -1235,7 +1166,7 @@ export default function NewBatchWorkspace({
     }
 
     setIsMerging(true);
-    const rows = source.map(questionToRow);
+    const rows = source.map(q => ({ ...questionToRow(q), reviewed_at: q.reviewedAt ?? null }));
     const { error } = await supabase.from('questions').upsert(rows, { onConflict: 'id' });
     setIsMerging(false);
 
@@ -1272,15 +1203,36 @@ export default function NewBatchWorkspace({
     all: 'new-batch-total-pool'
   };
 
-  const questionsInBucket = (bucket: ExportBucket) =>
-    bucket === 'all' ? questions : questions.filter(q => (q.reviewStatus || 'pending') === bucket);
+  const questionsInBucket = (bucket: ExportBucket, source: SATQuestion[] = questions) =>
+    bucket === 'all' ? source : source.filter(q => (q.reviewStatus || 'pending') === bucket);
 
-  const exportBucketAsJson = (bucket: ExportBucket) => {
+  const waitForPendingWrites = async () => {
+    for (let i = 0; i < 50 && pendingWritesRef.current.size > 0; i++) await new Promise(r => setTimeout(r, 200));
+    return pendingWritesRef.current.size === 0;
+  };
+
+  // Exports read from the database, not the in-memory list, which can be partial or stale.
+  const loadExportSource = async (): Promise<SATQuestion[] | null> => {
+    if (!(await waitForPendingWrites())) {
+      showToast('Still saving recent changes — try the export again in a moment.', 'error');
+      return null;
+    }
+    try {
+      return await fetchAllQuestions<Batch2Row>(TABLE_NAME, rowToBatch2Question);
+    } catch (err) {
+      showToast(`Export cancelled — could not read questions from the database: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      return null;
+    }
+  };
+
+  const exportBucketAsJson = async (bucket: ExportBucket) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    const list = questionsInBucket(bucket);
+    const source = await loadExportSource();
+    if (!source) return;
+    const list = questionsInBucket(bucket, source);
     if (list.length === 0) {
       showToast(`No ${EXPORT_BUCKET_LABELS[bucket].toLowerCase()} to export.`, 'error');
       return;
@@ -1309,16 +1261,19 @@ export default function NewBatchWorkspace({
   // Curator tab's equivalent button exactly (same buildRawExportRecord
   // shape), so "raw" means the same thing in both places. One click, no
   // dropdown.
-  const downloadRawExport = () => {
+  const downloadRawExport = async () => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    if (questions.length === 0) {
-      showToast('No questions to export.', 'error');
+    const source = await loadExportSource();
+    if (!source) return;
+    const reviewed = source.filter(isReviewed);
+    if (reviewed.length === 0) {
+      showToast('No reviewed questions to export.', 'error');
       return;
     }
-    const records = questions.map(buildRawExportRecord);
+    const records = reviewed.map(buildRawExportRecord);
     const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement('a');
@@ -1331,15 +1286,15 @@ export default function NewBatchWorkspace({
       URL.revokeObjectURL(url);
     }, 100);
 
-    showToast(`Exported ${records.length} question(s) — Raw (full detail).`, 'success');
+    showToast(`Exported ${records.length} question(s) — Raw (full detail, reviewed only).`, 'success');
     logEvent('note', `Exported ${records.length} question(s) — Raw (full detail)`);
   };
 
   // --- Date-wise RAW export. Same full raw/new-batch schema as the one-click
-  // Export Raw (buildRawExportRecord), but filtered to a created_at date range
-  // (inclusive). Only the date filter differs — validator details, stimulus,
+  // Export Raw (buildRawExportRecord), but filtered to the review-decision date range
+  // (inclusive; pending questions excluded). Only the date filter differs — validator details, stimulus,
   // batch metadata and every other raw field are preserved exactly.
-  const downloadRawRangeExport = (fromKey: string, toKey: string) => {
+  const downloadRawRangeExport = async (fromKey: string, toKey: string) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
@@ -1352,9 +1307,11 @@ export default function NewBatchWorkspace({
       showToast('The "From" date cannot be after the "To" date.', 'error');
       return;
     }
-    const inRange = questions.filter(q => isRawInDateRange(q, fromKey, toKey));
+    const source = await loadExportSource();
+    if (!source) return;
+    const inRange = source.filter(q => isRawInDateRange(q, fromKey, toKey));
     if (inRange.length === 0) {
-      showToast(`No raw questions found between ${fromKey} and ${toKey}.`, 'error');
+      showToast(`No reviewed questions found between ${fromKey} and ${toKey}.`, 'error');
       return;
     }
     const records = inRange.map(buildRawExportRecord);
@@ -1371,10 +1328,8 @@ export default function NewBatchWorkspace({
       URL.revokeObjectURL(url);
     }, 100);
 
-    showToast(`Exported ${records.length} raw question(s) created between ${fromKey} and ${toKey}.`, 'success');
+    showToast(`Exported ${records.length} reviewed raw question(s) between ${fromKey} and ${toKey}.`, 'success');
     logEvent('note', `Exported ${records.length} raw question(s) for ${fromKey} to ${toKey} (full detail)`);
-    setIsRawExportMenuOpen(false);
-    setRawRangeOpen(false);
   };
 
   // --- Production question bank export for this New Batch pool. Produces the
@@ -1382,12 +1337,14 @@ export default function NewBatchWorkspace({
   // Coach production schema, README §1) — shared builder, so both workspaces
   // emit byte-identical records. Each approved question becomes ONE complete
   // record (passage/stimulus embedded as fields, never separate rows).
-  const downloadProductionBank = () => {
+  const downloadProductionBank = async () => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    const approved = questions.filter(q => q.reviewStatus === 'approved');
+    const source = await loadExportSource();
+    if (!source) return;
+    const approved = source.filter(q => q.reviewStatus === 'approved');
     if (approved.length === 0) {
       showToast('No approved questions yet — approve some before exporting the production bank.', 'error');
       return;
@@ -1415,15 +1372,14 @@ export default function NewBatchWorkspace({
   // --- Datewise "approved questions" export for daily student-app hand-off,
   // scoped to this New Batch pool (questions_batch2). Mirrors the same
   // feature on the main Curator tab (see App.tsx: downloadApprovedRangeBatch)
-  // — same minimal schema, same "updated_at as approved-on-day proxy"
-  // caveat (no dedicated approved_at column here either), kept as its own
+  // — same minimal schema and the same reviewed_at date basis, kept as its own
   // separate function since this workspace's `questions` state is isolated
   // from the Curator tab's and must never be mixed into one export.
   //
   // Accepts a from/to date range (inclusive) instead of a single day, so a
   // multi-day backlog can be pulled in one file, or a single day by setting
   // from === to.
-  const downloadApprovedRangeBatch = (fromKey: string, toKey: string) => {
+  const downloadApprovedRangeBatch = async (fromKey: string, toKey: string) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
@@ -1433,7 +1389,9 @@ export default function NewBatchWorkspace({
       return;
     }
     const [rangeStart, rangeEnd] = fromKey <= toKey ? [fromKey, toKey] : [toKey, fromKey];
-    const approvedInRange = questions.filter(q => isApprovedInDateRange(q, fromKey, toKey));
+    const source = await loadExportSource();
+    if (!source) return;
+    const approvedInRange = source.filter(q => isApprovedInDateRange(q, fromKey, toKey));
     if (approvedInRange.length === 0) {
       showToast(`No New Batch questions were approved between ${rangeStart} and ${rangeEnd}.`, 'error');
       return;
@@ -1456,7 +1414,24 @@ export default function NewBatchWorkspace({
 
     showToast(`Exported ${records.length} question(s) approved between ${rangeStart} and ${rangeEnd}.`, 'success');
     logEvent('note', `Exported ${records.length} approved question(s) for ${rangeStart} to ${rangeEnd} (student app batch)`);
-    setIsRangeExportOpen(false);
+  };
+
+  const downloadApprovedAll = async () => {
+    if (!isAdmin) {
+      showToast('Only admins can export questions.', 'error');
+      return;
+    }
+    const source = await loadExportSource();
+    if (!source) return;
+    const approved = source.filter(q => q.reviewStatus === 'approved');
+    if (approved.length === 0) {
+      showToast('No approved questions to export.', 'error');
+      return;
+    }
+    const records = approved.map(buildProductionExportRecord);
+    downloadJson(records, `new-batch-approved-questions-all-${toLocalDateKey(new Date().toISOString())}.json`);
+    showToast(`Exported ${records.length} approved question(s) (student app schema).`, 'success');
+    logEvent('note', `Exported ${records.length} approved question(s) — all dates (student app schema)`);
   };
 
   // Comments/consensus reviews are arrays on the question, but a spreadsheet
@@ -1477,12 +1452,14 @@ export default function NewBatchWorkspace({
           })
           .join(' | ');
 
-  const exportBucketAsExcel = (bucket: ExportBucket) => {
+  const exportBucketAsExcel = async (bucket: ExportBucket) => {
     if (!isAdmin) {
       showToast('Only admins can export questions.', 'error');
       return;
     }
-    const list = questionsInBucket(bucket);
+    const source = await loadExportSource();
+    if (!source) return;
+    const list = questionsInBucket(bucket, source);
     if (list.length === 0) {
       showToast(`No ${EXPORT_BUCKET_LABELS[bucket].toLowerCase()} to export.`, 'error');
       return;
@@ -1646,160 +1623,37 @@ export default function NewBatchWorkspace({
                   Export Production Bank
                 </button>
 
-                <div className="relative" ref={rawExportMenuRef}>
-                  <button
-                    onClick={() => {
-                      setIsRawExportMenuOpen(open => !open);
-                      setRawRangeOpen(false);
-                    }}
-                    disabled={questions.length === 0}
-                    title="Export every New Batch question with the full internal/validator-detail schema — either the whole pool or a date range"
-                    className={`inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
-                      questions.length === 0
-                        ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                        : 'bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs'
-                    }`}
-                  >
-                    <Download className="w-4 h-4" />
-                    Export Raw
-                    <ChevronDown className={`w-4 h-4 transition-transform ${isRawExportMenuOpen && !rawRangeOpen ? 'rotate-180' : ''}`} />
-                  </button>
+                <ExportMenu
+                  label="Export Raw"
+                  title="Export New Batch reviewed questions (approved, rejected, needs revision) with the full internal/validator-detail schema — all of them or a date range"
+                  disabled={questions.length === stats.pending}
+                  buttonClassName="bg-zinc-800 hover:bg-zinc-900 text-white border-zinc-800 shadow-xs"
+                  confirmClassName="border-zinc-800 bg-zinc-800 text-white hover:bg-zinc-900"
+                  all={{ label: 'Export All Raw', hint: 'Every reviewed question, full internal schema', onExport: downloadRawExport }}
+                  range={{
+                    label: 'Export Raw (Date Range)',
+                    hint: 'Filter by review date',
+                    heading: 'Raw Questions Export',
+                    description: 'Reviewed New Batch questions decided within the selected range (full internal schema).',
+                    onExport: downloadRawRangeExport
+                  }}
+                />
 
-                  {isRawExportMenuOpen && !rawRangeOpen && (
-                    <div className="absolute right-0 mt-1.5 w-64 max-w-[calc(100vw-1.5rem)] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden">
-                      <button
-                        onClick={() => { downloadRawExport(); setIsRawExportMenuOpen(false); }}
-                        disabled={questions.length === 0}
-                        title="Export every New Batch question (all review statuses), full detail"
-                        className="w-full flex items-center gap-2.5 px-3.5 py-3 text-left hover:bg-[#f2f2f3] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <FileText className="w-4 h-4 text-zinc-500 shrink-0" />
-                        <span className="min-w-0">
-                          <span className="block text-xs font-semibold text-zinc-900">Export All Raw</span>
-                          <span className="block text-[11px] text-zinc-500">Every question, full internal schema</span>
-                        </span>
-                      </button>
-                      <div className="border-t border-[#e4e4e7]" />
-                      <button
-                        onClick={() => setRawRangeOpen(true)}
-                        disabled={questions.length === 0}
-                        title="Export raw questions created within a date range"
-                        className="w-full flex items-center gap-2.5 px-3.5 py-3 text-left hover:bg-[#f2f2f3] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <CalendarRange className="w-4 h-4 text-[#4f46e5] shrink-0" />
-                        <span className="min-w-0">
-                          <span className="block text-xs font-semibold text-zinc-900">Export Raw (Date Range)</span>
-                          <span className="block text-[11px] text-zinc-500">Filter by created date</span>
-                        </span>
-                      </button>
-                    </div>
-                  )}
-
-                  {isRawExportMenuOpen && rawRangeOpen && (
-                    <div
-                      data-raw-range-popup
-                      className={`absolute right-0 w-72 max-w-[calc(100vw-1.5rem)] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5 ${
-                        rawRangePopupAbove ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
-                      }`}
-                    >
-                      <p className="text-xs font-bold text-zinc-900">Raw Questions Export</p>
-                      <p className="text-[11px] text-zinc-500 mb-2">
-                        Select the date range for the raw New Batch questions to export (full internal schema).
-                      </p>
-                      <div className="flex flex-col gap-2">
-                        <label className="text-[11px] font-semibold text-zinc-600">
-                          From
-                          <input
-                            type="date"
-                            value={rawRangeFrom}
-                            onChange={(e) => setRawRangeFrom(e.target.value)}
-                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                          />
-                        </label>
-                        <label className="text-[11px] font-semibold text-zinc-600">
-                          To
-                          <input
-                            type="date"
-                            value={rawRangeTo}
-                            onChange={(e) => setRawRangeTo(e.target.value)}
-                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                          />
-                        </label>
-                        <div className="mt-1 flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => { setRawRangeOpen(false); setIsRawExportMenuOpen(false); }}
-                            title="Cancel the raw date range export"
-                            className="px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-[#e4e4e7] bg-[#fafafa] text-zinc-700 hover:bg-[#f2f2f3] transition-all cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => downloadRawRangeExport(rawRangeFrom, rawRangeTo)}
-                            title="Download raw questions created within the selected range"
-                            className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-zinc-800 bg-zinc-800 text-white hover:bg-zinc-900 transition-all cursor-pointer"
-                          >
-                            <Download className="w-3 h-3" /> Export Raw
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="relative" ref={rangeExportMenuRef}>
-                  <button
-                    onClick={() => setIsRangeExportOpen(open => !open)}
-                    title="Export approved New Batch questions (student app schema) for a date range"
-                    className="inline-flex items-center justify-center gap-1.5 px-3.5 h-10 text-xs font-semibold rounded-lg border transition-all cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
-                  >
-                    <Download className="w-4 h-4" />
-                    Export Approved (Date Range)
-                  </button>
-
-                  {isRangeExportOpen && (
-                    <div
-                      data-range-popup
-                      className={`absolute right-0 w-72 max-w-[calc(100vw-1.5rem)] bg-white border border-[#e4e4e7] rounded-xl shadow-2xl z-30 overflow-hidden p-3.5 ${
-                        rangePopupAbove ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
-                      }`}
-                    >
-                      <p className="text-xs font-bold text-zinc-900">Approved Questions (Student App Schema)</p>
-                      <p className="text-[11px] text-zinc-500 mb-2">Only New Batch questions approved within the selected range</p>
-                      <div className="flex flex-col gap-2">
-                        <label className="text-[11px] font-semibold text-zinc-600">
-                          From
-                          <input
-                            type="date"
-                            value={exportRangeFrom}
-                            onChange={(e) => setExportRangeFrom(e.target.value)}
-                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                          />
-                        </label>
-                        <label className="text-[11px] font-semibold text-zinc-600">
-                          To
-                          <input
-                            type="date"
-                            value={exportRangeTo}
-                            onChange={(e) => setExportRangeTo(e.target.value)}
-                            className="mt-1 w-full px-2 py-1.5 text-[11px] font-medium border border-[#e4e4e7] rounded-lg bg-white text-zinc-700"
-                          />
-                        </label>
-                        <button
-                          onClick={() => downloadApprovedRangeBatch(exportRangeFrom, exportRangeTo)}
-                          disabled={!exportRangeFrom || !exportRangeTo}
-                          title="Download the selected range's approved New Batch questions in the student app schema"
-                          className={`mt-1 flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
-                            !exportRangeFrom || !exportRangeTo
-                              ? 'bg-[#fafafa] text-zinc-600 border-[#e4e4e7] cursor-not-allowed'
-                              : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
-                          }`}
-                        >
-                          <FileText className="w-3 h-3" /> Download JSON
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <ExportMenu
+                  label="Export Approved"
+                  title="Export approved New Batch questions in the student app schema — all of them or a date range"
+                  disabled={stats.approved === 0}
+                  buttonClassName="bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
+                  confirmClassName="border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700"
+                  all={{ label: 'Export All Approved', hint: 'Every approved question, student app schema', onExport: downloadApprovedAll }}
+                  range={{
+                    label: 'Export Approved (Date Range)',
+                    hint: 'Filter by approval date',
+                    heading: 'Approved Questions (Student App Schema)',
+                    description: 'Only New Batch questions approved within the selected range',
+                    onExport: downloadApprovedRangeBatch
+                  }}
+                />
 
                 <div className="relative" ref={exportMenuRef}>
                   <button
